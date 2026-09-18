@@ -7,7 +7,12 @@
 #include <httplib.h>
 
 #include "auth/account.h"
+#include "auth/context.h"
+#include "auth/jwt.h"
+#include "auth/login.h"
+#include "auth/rate_limit.h"
 #include "auth/register.h"
+#include "db/users.h"
 
 namespace oj {
 
@@ -21,7 +26,7 @@ class Database;
 // 使循环退出并回收线程资源。
 class HttpServer {
 public:
-  HttpServer(std::string host, int port, Database &db);
+  HttpServer(std::string host, int port, Database &db, auth::JwtConfig jwt_config);
   ~HttpServer();
 
   HttpServer(const HttpServer &) = delete;
@@ -35,15 +40,24 @@ public:
 
   bool is_running() const;
 
+  // 暴露限速器，便于集成测试验证限速行为（返回引用，测试方可注入时钟）。
+  auth::RateLimiter &rate_limiter() { return rate_limiter_; }
+
 private:
   void setup_routes();
   void handle_register(const httplib::Request &req, httplib::Response &res);
+  void handle_login(const httplib::Request &req, httplib::Response &res);
+  void handle_me(const httplib::Request &req, httplib::Response &res);
 
   std::string host_;
   int port_;
   Database &db_;
+  auth::JwtService jwt_;
+  UserStore user_store_;
+  auth::RateLimiter rate_limiter_;
   auth::RandomAccountGenerator account_gen_;
   auth::RegisterService register_service_;
+  auth::LoginService login_service_;
   httplib::Server svr_;
   std::thread listen_thread_;
   std::atomic<bool> running_{false};

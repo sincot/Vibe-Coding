@@ -9,8 +9,9 @@
 - [x] M0.2 构建与 HTTP 服务（CMake 接入 cpp-httplib，`GET /api/health` 健康检查，优雅停止）
 - [x] M0.3 数据库基础（SQLite 接入、五张业务表建表 + 约束/索引、WAL 与外键、首次启动自动初始化、argon2id 预置 admin、生命周期接入）
 - [x] M1.1 注册（10 位随机账号分配 + 昵称唯一性 + argon2id 密码哈希 + `POST /api/register`）
+- [x] M1.2 登录与身份验证（JWT 签发/校验 + `POST /api/login` + 登录限速 + Bearer 鉴权 + `GET /api/me`）
 
-后续阶段（登录/JWT、题目、判题、前端）尚未实现。
+后续阶段（改密、题目、判题、前端）尚未实现。
 
 ## 环境要求
 
@@ -19,10 +20,12 @@ Ubuntu 22.04 LTS，安装依赖：
 ```bash
 sudo apt update
 sudo apt install -y build-essential cmake libcpp-httplib-dev nlohmann-json3-dev \
-  libsqlite3-dev libargon2-dev
+  libsqlite3-dev libargon2-dev libssl-dev
 ```
 
 > 完整依赖清单（seccomp、jwt-cpp、tmpfs 挂载等后续阶段使用）见 `dependence.md`。
+> M1.2 起需要 jwt-cpp（header-only）与 libssl（JWT HS256 所用 libcrypto），
+> jwt-cpp 安装方式见 `dependence.md` 3.6 节。
 
 ## 构建
 
@@ -72,6 +75,8 @@ ctest --test-dir build --output-on-failure
 | `--port` | `8080` | 监听端口（1-65535 的整数） |
 | `--db` | `data/oj.db` | SQLite 数据库路径 |
 | `OJ_ADMIN_PASSWORD` | （无） | 首次初始化（尚无 admin）时预置的管理员初始密码 |
+| `OJ_JWT_SECRET` | （无，必需） | JWT HS256 签名密钥，长度不少于 16 字节，无默认值 |
+| `OJ_JWT_EXPIRES_SECONDS` | `3600` | JWT 有效期（秒），须为 1..31536000 的整数 |
 
 非法输入（如 `--port abc`、`--port 0`、未知参数）会打印错误信息并以非零返回码退出；
 端口被占用或地址不可用时同样报错并以非零返回码退出。
@@ -87,6 +92,18 @@ ctest --test-dir build --output-on-failure
 
 - 数据库中已有 `admin` 时无需再设置该变量；重复启动不会重复创建 admin，也不会覆盖密码或重置首次改密标记。
 - 数据库未就绪（缺少初始密码、路径不可写等）时，服务在开始监听前报错并以非零返回码退出。
+
+### JWT 密钥配置
+
+- `OJ_JWT_SECRET` 为**必填**，长度不少于 16 字节，无默认值。缺失、为空或过短时服务在开始监听前报错并以非零返回码退出，绝不使用公开默认密钥启动。
+- 建议使用 `openssl rand -hex 32` 生成强随机密钥；密钥只从环境变量读取，不写入源码、版本控制或日志。
+- 保持同一密钥重启服务后，重启前签发且未过期的 token 仍可继续验证；更换密钥会使已有 token 立即失效。
+- 生成示例：
+
+  ```bash
+  OJ_JWT_SECRET="$(openssl rand -hex 32)" \
+  OJ_ADMIN_PASSWORD='请改为强密码' ./build/oj_server
+  ```
 
 ### 访问验证接口
 
@@ -140,6 +157,79 @@ Content-Type: application/json
 | `201` | 注册成功 |
 | `400` | 非法输入：JSON 解析失败、字段缺失/类型错误、非法昵称或密码 |
 | `409` | 昵称已被使用（含并发冲突） |
+| `500` | 内部故障 |
+
+### 登录接口
+
+`POST /api/login`（公开，无需登录），请求体为 JSON，仅读取 `account` 与 `password`。
+普通用户使用系统分配的 10 位数字账号，预置管理员使用 `admin`：
+
+```bash
+curl -i -X POST http://127.0.0.1:8080/api/login \
+  -H 'Content-Type: application/json' \
+  -d '{"account":"3084523017","password":"Secret123"}'
+```
+
+成功响应（`200`）：
+
+```
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"expires_in":3600,"token":"<jwt>","token_type":"Bearer",
+ "user":{"account":"3084523017","id":2,"nickname":"alice","reset_pwd_flag":0,"role":"user"}}
+```
+
+- `token`：JWT（HS256），后续请求通过 `Authorization: Bearer <token>` 携带。
+- `token_type`：固定 `Bearer`；`expires_in`：有效期（秒）。
+- `user`：当前用户信息，含 `reset_pwd_flag`（预置 admin 为 `1`，供后续首次改密流程使用）。
+- 响应不包含密码、密码哈希或密钥；错误账号与错误密码返回一致的失败提示，不泄露账号是否存在。
+
+输入规则：
+
+| 字段 | 类型 | 规则 |
+|---|---|---|
+| `account` | string | 非空；普通用户为 10 位数字账号，预置管理员为 `admin` |
+| `password` | string | 非空；不裁剪不截断，空白视为有效内容 |
+
+### 当前用户信息
+
+`GET /api/me`（需登录），通过 Bearer token 鉴权：
+
+```bash
+curl -i http://127.0.0.1:8080/api/me \
+  -H 'Authorization: Bearer <token>'
+```
+
+成功响应（`200`）：
+
+```
+{"account":"3084523017","id":2,"nickname":"alice","reset_pwd_flag":0,"role":"user"}
+```
+
+服务验证 token 签名、算法、过期时间与身份字段后，会**重新查询数据库**返回当前
+昵称、角色与首次改密标记，因此数据库中的最新信息会实时反映，不返回密码哈希等敏感字段。
+
+### 登录限速
+
+- 维度：来源 IP（`remote_addr`，不信任 `X-Forwarded-For` 等客户端提供的转发头）。
+- 阈值：同一 IP 在 15 分钟窗口内连续 **5 次** 登录失败后，第 6 次起返回 `429`。
+- 解除：窗口自最早失败时刻起 15 分钟后自动解除；登录成功会清空该 IP 的失败计数。
+- 触发限速时响应含 `Retry-After`（秒）头。
+- 实现为进程内状态（线程安全），不跨重启持久化；重启后计数清零。
+
+### 错误约定
+
+错误响应体统一为 `{"error":"..."}`，内部故障返回通用文案，不泄露数据库/哈希/密钥/token 细节：
+
+| 状态码 | 含义 |
+|---|---|
+| `200` | 登录成功 / 获取用户信息成功 |
+| `201` | 注册成功 |
+| `400` | 非法输入：JSON 解析失败、字段缺失/类型错误、非法昵称/密码/账号/密码为空 |
+| `401` | 登录失败（账号或密码错误）/ 认证无效（缺失、损坏、伪造、篡改、过期、无签名、算法不匹配或引用不存在用户等 token） |
+| `409` | 昵称已被使用（含并发冲突） |
+| `429` | 登录尝试过于频繁（触发限速） |
 | `500` | 内部故障 |
 
 ### 停止服务

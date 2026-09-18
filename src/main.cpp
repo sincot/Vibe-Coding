@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 
+#include "auth/jwt.h"
 #include "db/database.h"
 #include "db/schema.h"
 #include "http/server.h"
@@ -46,9 +47,12 @@ void print_usage(std::ostream &os, const char *prog) {
      << "  --db    SQLite 数据库路径，默认 data/oj.db\n"
      << "  --help  显示本帮助\n"
      << "\n"
-     << "环境变量:\n"
-     << "  OJ_ADMIN_PASSWORD  首次初始化（尚无 admin）时预置的管理员初始密码；\n"
-     << "                     已有 admin 时无需设置。\n";
+      << "环境变量:\n"
+      << "  OJ_ADMIN_PASSWORD  首次初始化（尚无 admin）时预置的管理员初始密码；\n"
+      << "                     已有 admin 时无需设置。\n"
+      << "  OJ_JWT_SECRET      JWT 签名密钥（必需，长度不少于 "
+      << oj::auth::kMinJwtSecretLen << " 字节）。\n"
+      << "  OJ_JWT_EXPIRES_SECONDS  JWT 有效期（秒），默认 3600。\n";
 }
 
 bool parse_port(const std::string &text, int &out) {
@@ -165,7 +169,18 @@ int main(int argc, char **argv) {
   }
   oj::log(oj::LogLevel::Info, "数据库结构初始化完成");
 
-  oj::HttpServer server(cfg.host, cfg.port, *db);
+  // 加载 JWT 配置：密钥缺失或无效时立即报错退出，绝不以公开默认密钥启动。
+  oj::auth::JwtConfig jwt_config;
+  std::string jwt_error;
+  if (!oj::auth::load_jwt_config(jwt_config, jwt_error)) {
+    oj::log(oj::LogLevel::Error, "JWT 配置错误: " + jwt_error);
+    return 1;
+  }
+  oj::log(oj::LogLevel::Info,
+          "JWT 配置已加载（有效期 " +
+              std::to_string(jwt_config.expires_seconds) + " 秒）");
+
+  oj::HttpServer server(cfg.host, cfg.port, *db, std::move(jwt_config));
   if (!server.start(error)) {
     oj::log(oj::LogLevel::Error, "启动失败: " + error);
     return 1;

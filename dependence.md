@@ -87,6 +87,9 @@ rm -rf jwt-cpp
 ```
 
 - 安装后以 `#include <jwt-cpp/jwt.h>` 使用；HS256 依赖 OpenSSL（已由 `libssl-dev` 提供）。
+- 本项目使用 jwt-cpp 的 **nlohmann-json** traits（`#include <jwt-cpp/traits/nlohmann-json/defaults.h>`），
+  与项目 JSON 依赖 `nlohmann-json3-dev` 保持一致，无需额外引入 picojson。
+- 运行时需通过环境变量 `OJ_JWT_SECRET` 提供 HS256 签名密钥（详见 README 与本节 6.5）。
 
 ### 3.7 运维辅助
 
@@ -160,3 +163,9 @@ mount | grep oj-tmpfs
 
 数据库（`libsqlite3-dev`）与密码哈希（`libargon2-dev`）在 3.2 / 3.4 节已列出，
 安装命令见对应小节；无额外新增系统包。
+
+### 6.5 JWT 签名密钥（M1.2 起）
+
+- 通过环境变量 `OJ_JWT_SECRET` 提供 HS256 签名密钥（必填，长度不少于 16 字节，无默认值）。
+- 有效期通过 `OJ_JWT_EXPIRES_SECONDS` 配置（可选，默认 3600 秒）。
+- 密钥不写入源码、版本控制或日志；保持同一密钥重启后，未过期的 token 仍可验证。

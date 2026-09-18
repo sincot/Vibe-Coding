@@ -28,6 +28,7 @@
 #include <nlohmann/json.hpp>
 
 #include "auth/password.h"
+#include "auth/jwt.h"
 #include "db/database.h"
 #include "db/schema.h"
 #include "db/users.h"
@@ -106,7 +107,10 @@ public:
       return;
     }
     port_ = find_free_port();
-    server_ = std::make_unique<oj::HttpServer>("127.0.0.1", port_, *db_);
+    oj::auth::JwtConfig jwt;
+    jwt.secret = "test-secret-0123456789abcdef";
+    jwt.expires_seconds = 3600;
+    server_ = std::make_unique<oj::HttpServer>("127.0.0.1", port_, *db_, jwt);
     if (!server_->start(err)) {
       return;
     }

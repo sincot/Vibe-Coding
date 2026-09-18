@@ -53,6 +53,21 @@ if(NOT ARGON2_INCLUDE_DIR OR NOT ARGON2_LIBRARY)
 endif()
 
 # ---------------------------------------------------------------------------
+# OpenSSL libcrypto（JWT HS256 签名所需 HMAC，jwt-cpp header-only 依赖）
+# ---------------------------------------------------------------------------
+find_package(OpenSSL REQUIRED)
+
+# ---------------------------------------------------------------------------
+# jwt-cpp（header-only，源码安装于 /usr/local/include，见 dependence.md）
+# 使用 nlohmann-json 作为其 JSON traits（与项目 JSON 依赖保持一致）。
+# ---------------------------------------------------------------------------
+find_path(JWT_CPP_INCLUDE_DIR jwt-cpp/jwt.h)
+if(NOT JWT_CPP_INCLUDE_DIR)
+  message(FATAL_ERROR
+    "未找到 jwt-cpp。请按 dependence.md 安装到 /usr/local/include。")
+endif()
+
+# ---------------------------------------------------------------------------
 # 核心静态库：数据库、认证与 HTTP 层（除程序入口外），供服务与测试复用。
 # ---------------------------------------------------------------------------
 add_library(oj_core STATIC
@@ -64,6 +79,10 @@ add_library(oj_core STATIC
   src/auth/account.cpp
   src/auth/validation.cpp
   src/auth/register.cpp
+  src/auth/jwt.cpp
+  src/auth/rate_limit.cpp
+  src/auth/login.cpp
+  src/auth/context.cpp
 )
 
 target_include_directories(oj_core PUBLIC
@@ -72,6 +91,7 @@ target_include_directories(oj_core PUBLIC
   ${JSON_INCLUDE_DIR}
   ${SQLITE3_INCLUDE_DIR}
   ${ARGON2_INCLUDE_DIR}
+  ${JWT_CPP_INCLUDE_DIR}
 )
 
 target_compile_definitions(oj_core PUBLIC
@@ -84,6 +104,7 @@ target_link_libraries(oj_core PUBLIC
   ${HTTPLIB_LIBRARY}
   ${SQLITE3_LIBRARY}
   ${ARGON2_LIBRARY}
+  OpenSSL::Crypto
   Threads::Threads
 )
 
@@ -136,3 +157,30 @@ add_executable(oj_register_api_test
 target_link_libraries(oj_register_api_test PRIVATE oj_core)
 
 add_test(NAME register_api COMMAND oj_register_api_test)
+
+# JWT 签发/验证单元测试（算法固定、claims、过期、伪造/篡改/无签名等）。
+add_executable(oj_jwt_test
+  tests/unit/test_jwt.cpp
+)
+
+target_link_libraries(oj_jwt_test PRIVATE oj_core)
+
+add_test(NAME jwt_unit COMMAND oj_jwt_test)
+
+# 登录限速单元测试（可注入时钟，验证阈值、窗口、解除、并发不可绕过）。
+add_executable(oj_rate_limit_test
+  tests/unit/test_rate_limit.cpp
+)
+
+target_link_libraries(oj_rate_limit_test PRIVATE oj_core)
+
+add_test(NAME rate_limit_unit COMMAND oj_rate_limit_test)
+
+# 登录与身份验证集成测试（真实 HTTP 服务 + 隔离临时库 + 测试密钥）。
+add_executable(oj_login_api_test
+  tests/integration/test_login_api.cpp
+)
+
+target_link_libraries(oj_login_api_test PRIVATE oj_core)
+
+add_test(NAME login_api COMMAND oj_login_api_test)

@@ -55,6 +55,33 @@ bool UserStore::find_by_account(const std::string &account, bool &found,
   return find_by(db_, "account", account, found, out, error);
 }
 
+bool UserStore::find_by_id(std::int64_t id, bool &found, UserRecord &out,
+                           std::string &error) {
+  Statement stmt;
+  if (!db_.prepare(
+          "SELECT id, account, nickname, password_hash, role, reset_pwd_flag, "
+          "created_at FROM users WHERE id = ?",
+          stmt, error)) {
+    return false;
+  }
+  if (!stmt.bind(1, static_cast<sqlite3_int64>(id))) {
+    error = stmt.errmsg();
+    return false;
+  }
+  int rc = stmt.step();
+  if (rc == SQLITE_ROW) {
+    load_row(stmt, out);
+    found = true;
+    return true;
+  }
+  if (rc == SQLITE_DONE) {
+    found = false;
+    return true;
+  }
+  error = stmt.errmsg();
+  return false;
+}
+
 bool UserStore::find_by_nickname(const std::string &nickname, bool &found,
                                  UserRecord &out, std::string &error) {
   return find_by(db_, "nickname", nickname, found, out, error);

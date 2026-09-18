@@ -33,6 +33,10 @@ public:
   bool find_by_account(const std::string &account, bool &found, UserRecord &out,
                        std::string &error);
 
+  // 按用户 ID（主键）查询，语义同上。供 token 身份校验后加载当前用户信息。
+  bool find_by_id(std::int64_t id, bool &found, UserRecord &out,
+                  std::string &error);
+
   // 按昵称查询，语义同上。
   bool find_by_nickname(const std::string &nickname, bool &found,
                         UserRecord &out, std::string &error);

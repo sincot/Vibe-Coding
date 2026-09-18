@@ -337,12 +337,42 @@ Vibe-Coding/
 
 #### M1.2 登录与身份验证
 
-- [ ] 配置 JWT 签名密钥、有效期及签发与验证逻辑。
-- [ ] 实现 `POST /api/login`。
-- [ ] 实现基础登录限速。
-- [ ] 封装 Bearer token 读取、登录检查及当前用户上下文。
-- [ ] 实现 `GET /api/me`。
-- [ ] 验证正确登录、错误密码、缺失及无效 token。
+- [x] 配置 JWT 签名密钥、有效期及签发与验证逻辑。
+- [x] 实现 `POST /api/login`。
+- [x] 实现基础登录限速。
+- [x] 封装 Bearer token 读取、登录检查及当前用户上下文。
+- [x] 实现 `GET /api/me`。
+- [x] 验证正确登录、错误密码、缺失及无效 token。
+
+> 实施说明：
+>
+> - **JWT**：接入 `jwt-cpp`（header-only，使用 nlohmann-json traits）+ OpenSSL
+>   libcrypto，仅允许 **HS256**。签发 claims：`iss=oj` / `aud=oj-api` / `iat` /
+>   `exp` / `sub`（稳定的数据库用户 ID，十进制字符串）；验证时要求签名、算法、
+>   iss、aud、exp、iat、sub 全部满足，`alg` 缺失或为 `none`/其它算法（如 HS384）
+>   均被拒绝，无签名 token 同样被拒。`sub` 须为十进制正整数且对应存在的用户，
+>   格式非法或引用不存在用户的 token 返回 401。
+> - **密钥与有效期**：`OJ_JWT_SECRET`（必填，长度 ≥ 16 字节，无默认值）与
+>   `OJ_JWT_EXPIRES_SECONDS`（可选，默认 3600）从环境变量读取；缺失、为空或过短
+>   时服务启动即报错并以非零码退出，绝不使用公开默认密钥。密钥不落日志/源码/
+>   版本控制；同一密钥重启后未过期 token 仍可验证。响应与日志均不记录密码、
+>   密码哈希、密钥或完整 token。
+> - **登录**：`POST /api/login` 读取 `account`/`password`（均须为非空字符串）。
+>   普通用户用 10 位数字账号、预置 admin 用 `admin`；复用 argon2id `verify_password`，
+>   密码不裁剪不截断。错误账号与错误密码返回一致的 `401 {"error":"账号或密码错误"}`，
+>   不泄露账号是否存在；数据库等内部故障返回 `500`，不伪装成密码错误。
+> - **登录响应**：`200` 返回 `token`、`token_type:"Bearer"`、`expires_in` 及
+>   `user{id, account, nickname, role, reset_pwd_flag}`，不含密码/哈希。
+> - **限速**：维度为来源 IP（`remote_addr`，不信任 `X-Forwarded-For`）；同一 IP
+>   15 分钟窗口内 5 次失败后返回 `429` + `Retry-After`（秒）。成功登录清空计数；
+>   窗口自最早失败起 15 分钟后自动解除。进程内互斥锁保护 + 周期性清理，线程安全、
+>   并发不可绕过、状态不无限增长；不跨重启持久化（SPEC 未要求）。
+> - **鉴权上下文**：`extract_bearer_token` 解析 `Authorization: Bearer <token>`；
+>   `authenticate_request` 验证 token 后按 `sub` 查询数据库确认用户存在并读取当前
+>   角色与首次改密标记，避免仅依赖 token 中可能过时的权限信息。`GET /api/me` 仅
+>   登录可访问，返回当前数据库信息，不含密码哈希。
+> - 错误约定：非法请求 `400`、登录失败/无效认证 `401`、限速 `429`、内部故障 `500`，
+>   错误体统一 `{"error":"..."}`。请求/响应示例、限速规则见 `README.md`。
 
 #### M1.3 改密与权限检查
 
