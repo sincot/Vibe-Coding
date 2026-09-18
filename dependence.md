@@ -1,89 +1,113 @@
 # 依赖清单与安装指南
 
-> 适用环境：Ubuntu 22.04 空白系统
-> 依据 `SPEC.md` 的实现方案制定（后端 C++ / cpp-httplib，判题 g++/gcc + ASan，存储 SQLite，沙箱 seccomp）
+> 适用环境：Ubuntu 22.04 LTS（Jammy）x86_64
+> 依据 `SPEC.md` 的实现方案制定（后端 C++ / cpp-httplib，判题 g++/gcc + ASan/UBSan，存储 SQLite，沙箱 seccomp-bpf）
+>
+> 本文件记录依赖的来源（系统包 / 源码）、用途与安装方式。版本为在 Ubuntu 22.04 软件源中核实到的候选版本（`apt-cache policy`），随系统更新可能小幅变化。
 
 ---
 
-## 1. 依赖总览
+## 1. 操作系统
 
-| 软件/库 | 用途 | 来源 |
+- 发行版：**Ubuntu 22.04 LTS（Jammy Jellyfish）**
+- 架构：x86_64（内核 5.15.0-*）
+- 说明：以下安装命令以「空白系统 + 拥有 sudo 权限的普通用户」为前提。
+
+---
+
+## 2. 依赖总览
+
+### 2.1 系统包（`apt` 安装）
+
+| 软件/库 | 版本（Jammy 候选） | 用途 |
 |---|---|---|
-| `build-essential`（gcc/g++/make） | 编译服务端；判题语言 C++17/C11；ASan/UBSan 随 gcc 自带 | apt |
-| `cmake` | 构建工程 | apt |
-| `sqlite3` + `libsqlite3-dev` | SQLite 存储 + 备份 `.dump` | apt |
-| `libseccomp-dev` | seccomp-bpf 沙箱（禁网/文件/读 proc） | apt |
-| `libargon2-dev` | 密码哈希 argon2id（AUTH-03） | apt |
-| `libssl-dev` | JWT HS256 签名所需 OpenSSL | apt |
-| `nlohmann-json3-dev` | JSON 序列化/解析 | apt |
-| `libcpp-httplib-dev` | 后端 HTTP 服务（静态托管 + JSON API） | apt |
-| `jwt-cpp` | JWT 生成/校验（header-only） | GitHub 下载 |
-| `cron` | cron 定期 `.dump` 备份（PERS-04） | apt |
-| `curl` | 回归脚本 `scripts/regression.sh` 用 | apt |
-| tmpfs 挂载点 | 判题一次性运行目录（JUDGE-04） | mount（运行时） |
+| `build-essential` | 12.9（gcc/g++ 11.2.0） | 编译服务端；同时作为判题语言 C++17 / C11 的编译器（ASan/UBSan 随 gcc 自带） |
+| `cmake` | 3.22.1 | 构建工程（M0.2 起使用） |
+| `sqlite3` | 3.37.2 | SQLite 命令行工具，备份脚本 `sqlite3 .dump` 使用 |
+| `libsqlite3-dev` | 3.37.2 | SQLite 的 C 开发头文件/库，服务端数据层接入 |
+| `libseccomp-dev` | 2.5.3 | seccomp-bpf 沙箱（禁网络 / 文件读写 / 读 /proc 等危险系统调用） |
+| `libargon2-dev` | 0~20171227 | argon2id 密码哈希（AUTH-03） |
+| `libssl-dev` | 3.0.2 | OpenSSL 3.0，JWT HS256 签名所需 libcrypto |
+| `nlohmann-json3-dev` | 3.10.5 | JSON 序列化 / 解析（API 与判题逐点结果） |
+| `libcpp-httplib-dev` | 0.10.3 | 后端 HTTP 服务（静态资源托管 + JSON API） |
+| `cron` | 3.0pl1 | 定期 `.dump` 备份（PERS-04） |
+| `curl` | 7.81.0 | 回归脚本 `scripts/regression.sh` 发起 HTTP 请求 |
 
-> 说明：`libcpp-httplib-dev` 在 Ubuntu 22.04 中版本约 0.9.x，满足 cpp-httplib 使用需求；若需更新版本可从 GitHub 单独拉取。
+### 2.2 源码安装（APT 无包）
+
+| 软件/库 | 来源 | 用途 |
+|---|---|---|
+| `jwt-cpp` | GitHub `Thalhammer/jwt-cpp`（header-only） | JWT 生成 / 校验（AUTH-04） |
+
+> 说明：jwt-cpp 为 header-only 库，Ubuntu 22.04 未收录（仅有 C 语言版 `libjwt`，非本项目所用 C++ 库），故采用源码安装。
 
 ---
 
-## 2. 安装命令
+## 3. 安装命令
 
-### 2.1 系统更新与构建工具
+### 3.1 系统更新与构建工具
 
 ```bash
 sudo apt update
 sudo apt install -y build-essential cmake
 ```
 
-### 2.2 存储
+### 3.2 存储（SQLite）
 
 ```bash
 sudo apt install -y sqlite3 libsqlite3-dev
 ```
 
-### 2.3 判题沙箱
+### 3.3 判题沙箱（seccomp）
 
 ```bash
 sudo apt install -y libseccomp-dev
 ```
 
-### 2.4 认证与安全
+### 3.4 认证与安全
 
 ```bash
 sudo apt install -y libargon2-dev libssl-dev
 ```
 
-### 2.5 JSON 与 HTTP 服务
+### 3.5 JSON 与 HTTP 服务
 
 ```bash
 sudo apt install -y nlohmann-json3-dev libcpp-httplib-dev
 ```
 
-### 2.6 jwt-cpp（header-only，APT 无包，源码安装）
+### 3.6 jwt-cpp（header-only，源码安装）
 
 ```bash
 cd /tmp
 git clone https://github.com/Thalhammer/jwt-cpp.git
+# 建议固定版本：cd jwt-cpp && git checkout <release-tag>
 sudo cp -r jwt-cpp/include/jwt-cpp /usr/local/include/
 rm -rf jwt-cpp
 ```
 
-### 2.7 运维辅助
+- 安装后以 `#include <jwt-cpp/jwt.h>` 使用；HS256 依赖 OpenSSL（已由 `libssl-dev` 提供）。
+
+### 3.7 运维辅助
 
 ```bash
 sudo apt install -y cron curl
 sudo systemctl enable --now cron
 ```
 
-### 2.8 判题 tmpfs 运行目录（一次性挂载）
+### 3.8 判题 tmpfs 运行目录（一次性挂载）
 
 ```bash
 sudo mkdir -p /opt/oj-tmpfs
 sudo mount -t tmpfs -o size=2G,mode=1777 tmpfs /opt/oj-tmpfs
 ```
 
-- 说明：不能加 `noexec`，判题需在此目录执行编译产物；大小 2G 可依机器内存调整。
-- 开机自动挂载：在 `/etc/fstab` 加入
+- 说明：
+  - **不能加 `noexec`**：判题需在此目录执行编译产物。
+  - `size=2G` 为容量上限，可按机器内存调整；`mode=1777` 允许判题子进程写入。
+  - 该挂载点在 `/opt` 下、仓库目录之外，重启后需重新挂载。
+
+- 开机自动挂载：在 `/etc/fstab` 追加一行
 
   ```
   tmpfs /opt/oj-tmpfs tmpfs defaults,size=2G,mode=1777 0 0
@@ -91,16 +115,21 @@ sudo mount -t tmpfs -o size=2G,mode=1777 tmpfs /opt/oj-tmpfs
 
 ---
 
-## 3. 安装后验证
+## 4. 安装后验证
 
 ```bash
-g++ --version && gcc --version && cmake --version && sqlite3 --version
+g++ --version && gcc --version
+cmake --version
+sqlite3 --version
+dpkg -l libseccomp-dev libargon2-dev libssl-dev nlohmann-json3-dev libcpp-httplib-dev | tail -n +6
+test -f /usr/local/include/jwt-cpp/jwt.h && echo "jwt-cpp OK"
+mount | grep oj-tmpfs
 ```
 
 ---
 
-## 4. 不需要安装的部分
+## 5. 不需要安装的部分
 
-- 前端：原生 HTML/CSS/JS + CodeMirror（CDN 引入，UI-04），无构建流程、无需安装
-- JWT 逻辑、argon 哈希调用、Rejudge、日志等均为代码实现
-- tmpfs 挂载与 cron 定时任务属运行时配置，非软件安装
+- 前端：原生 HTML/CSS/JS + CodeMirror（CDN 引入，UI-04），无构建流程、无需安装。
+- JWT 逻辑、argon 哈希调用、判题器、Rejudge、日志等均为本项目代码实现。
+- tmpfs 挂载与 cron 定时任务属于运行时配置，非软件安装。

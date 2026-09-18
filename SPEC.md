@@ -274,8 +274,8 @@ Vibe-Coding/
 
 #### M0.1 项目结构
 
-- [ ] `git init`，创建约定目录结构（`src/`、`web/`、`scripts/`、`data/`、`tests/`）。
-- [ ] 整理 `dependence.md`，记录依赖与安装方式。
+- [x] `git init`，创建约定目录结构（`src/`、`web/`、`scripts/`、`data/`、`tests/`）。
+- [x] 整理 `dependence.md`，记录依赖与安装方式。
 
 > 实施说明：随项目初始化配置忽略规则，排除构建产物、运行数据库、临时文件和敏感配置。
 

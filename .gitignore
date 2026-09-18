@@ -1,0 +1,50 @@
+# ===== 构建产物 =====
+/build/
+/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.exe
+*.out
+oj_server
+ojd
+
+# ===== 运行数据库及 SQLite 辅助文件（WAL/SHM） =====
+data/oj.db
+data/oj.db-wal
+data/oj.db-shm
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# ===== 日志 =====
+*.log
+logs/
+
+# ===== 备份 =====
+backup/
+*.dump
+
+# ===== 临时判题文件 =====
+tmp/
+*.tmp
+*.core
+
+# ===== 敏感配置 =====
+.env
+.env.*
+*.secret
+*.key
+config.local.*
+
+# ===== 保留目录占位文件 .gitkeep =====
+#（上面的规则不会影响 .gitkeep）
