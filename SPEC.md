@@ -264,8 +264,8 @@ Vibe-Coding/
 
 ### M0 工程骨架
 - [x] `git init`，约定目录结构（`src/`、`web/`、`scripts/`、`data/`、`tests/`）
-- [ ] CMake 构建 cpp-httplib 工程，`Ctrl+C` 优雅停止
-- [ ] SQLite 建表脚本 + WAL 开启 + 数据库初始化（含预置 admin 账号）
+- [x] CMake 构建 cpp-httplib 工程，`Ctrl+C` 优雅停止
+- [x] SQLite 建表脚本 + WAL 开启 + 数据库初始化（含预置 admin 账号）
 
 ### M1 最小端到端链路
 - [ ] 注册/登录/改密 + JWT 鉴权中间件

@@ -7,11 +7,15 @@
 #include "httplib.h"
 #include "nlohmann/json.hpp"
 
+#include "db/database.hpp"
+
 namespace {
 
 constexpr const char* kVersion = "0.1.0";
 constexpr const char* kDefaultHost = "0.0.0.0";
 constexpr int kDefaultPort = 8080;
+constexpr const char* kDefaultDbPath = "data/oj.db";
+constexpr int kDbBusyTimeoutMs = 5000;
 
 volatile std::sig_atomic_t g_stop_requested = 0;
 
@@ -20,10 +24,14 @@ void handle_signal(int) {
 }
 
 void print_usage(const char* argv0) {
-  std::cerr << "Usage: " << argv0 << " [--host HOST] [--port PORT] [--web DIR]\n"
-            << "  --host HOST   listen address, default " << kDefaultHost << "\n"
-            << "  --port PORT   listen port,   default " << kDefaultPort << "\n"
-            << "  --web DIR     static files root (front end), optional\n";
+  std::cerr << "Usage: " << argv0 << " [options]\n"
+            << "Options:\n"
+            << "  --host HOST           listen address, default " << kDefaultHost << "\n"
+            << "  --port PORT           listen port,   default " << kDefaultPort << "\n"
+            << "  --web DIR             static files root (front end), optional\n"
+            << "  --db PATH             SQLite database path, default " << kDefaultDbPath << "\n"
+            << "  --admin-password PWD  initial admin password (first init only);\n"
+            << "                        prefer env OJ_ADMIN_PASSWORD (won't leak via ps)\n";
 }
 
 }  // namespace
@@ -35,6 +43,8 @@ int main(int argc, char** argv) {
   std::string host = kDefaultHost;
   int port = kDefaultPort;
   std::string web_dir;
+  std::string db_path = kDefaultDbPath;
+  std::string admin_password;
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -44,6 +54,10 @@ int main(int argc, char** argv) {
       port = std::atoi(argv[++i]);
     } else if (arg == "--web" && i + 1 < argc) {
       web_dir = argv[++i];
+    } else if (arg == "--db" && i + 1 < argc) {
+      db_path = argv[++i];
+    } else if (arg == "--admin-password" && i + 1 < argc) {
+      admin_password = argv[++i];
     } else if (arg == "--help" || arg == "-h") {
       print_usage(argv[0]);
       return 0;
@@ -51,6 +65,12 @@ int main(int argc, char** argv) {
       std::cerr << "Unknown or incomplete option: " << arg << "\n";
       print_usage(argv[0]);
       return 2;
+    }
+  }
+
+  if (admin_password.empty()) {
+    if (const char* env_pwd = std::getenv("OJ_ADMIN_PASSWORD"); env_pwd != nullptr) {
+      admin_password = env_pwd;
     }
   }
 
@@ -82,6 +102,33 @@ int main(int argc, char** argv) {
     }
   }
 
+  oj::Database db;
+  std::string db_err;
+  if (!db.Open(db_path, kDbBusyTimeoutMs, &db_err)) {
+    std::cerr << "[oj] fatal: database init failed: " << db_err << "\n";
+    return 1;
+  }
+  if (!db.InitSchema(&db_err)) {
+    std::cerr << "[oj] fatal: schema init failed: " << db_err << "\n";
+    db.Close();
+    return 1;
+  }
+  const int admin_rc = db.EnsureAdmin("admin", "admin", admin_password, &db_err);
+  if (admin_rc < 0) {
+    std::cerr << "[oj] fatal: " << db_err << "\n";
+    db.Close();
+    return 1;
+  }
+  admin_password.clear();
+
+  if (admin_rc == 1) {
+    std::cout << "[oj] database ready at " << db_path
+              << " (schema created, admin account seeded)\n";
+  } else {
+    std::cout << "[oj] database ready at " << db_path
+              << " (existing data kept, admin account present)\n";
+  }
+
   std::signal(SIGINT, handle_signal);
   std::signal(SIGTERM, handle_signal);
 
@@ -101,6 +148,8 @@ int main(int argc, char** argv) {
   if (server_thread.joinable()) {
     server_thread.join();
   }
+  db.Close();
+  std::cout << "[oj] database closed\n";
 
   if (listen_ok) {
     std::cout << "[oj] server stopped cleanly\n";
