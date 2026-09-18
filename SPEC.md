@@ -36,7 +36,7 @@
 | PRB-02 | 时限/内存上限有默认值（默认 2s / 64MB），按题可覆盖；备注：因 ASan 判题时延显著，默认放宽到 2s 并建议出题者按题校准 |
 | PRB-03 | 题面为纯文本（先不做 Markdown 渲染）；测试用例支持文本粘贴逐点录入/编辑/删除 |
 | PRB-04 | 题目前端支持搜索 + 难度/标签筛选 |
-| PRB-05 | 隐藏用例绝不泄露给学生；题目详情只返回样例 |
+| PRB-05 | 题目详情只返回样例，隐藏用例绝不随题面下发；提交 **WA** 时，判题反馈向提交者本人返回失败测试点的**输入 / 期望输出 / 用户输出**比对详情（教学复盘用，其余通过点不泄露） |
 
 ### 2.3 判题系统（核心）
 | 编号 | 需求 |
@@ -47,7 +47,7 @@
 | JUDGE-04 | 运行目录：tmpfs 下一次性随机目录，仅本次提交可见，用后即销毁 |
 | JUDGE-05 | 输出字节上限 64KB（防刷屏打爆磁盘） |
 | JUDGE-06 | AC 判定：去除每行行尾空白与文末空行后逐字符比对 |
-| JUDGE-07 | **全部测试点跑完**后汇总反馈，逐测试点结果可见 |
+| JUDGE-07 | **全部测试点跑完**后汇总反馈，逐测试点结果可见；**WA** 时反馈附失败测试点的输入 / 期望输出 / 用户实际输出 |
 | JUDGE-08 | 状态机：`AC` / `WA` / `CE`(编译错误) / `TLE`(超时) / `RE`(运行错误/崩溃) / `MLE`(超内存) / `SYSERR`(系统内部错误) |
 | JUDGE-09 | 判题在线程池中执行（worker 数 = min(CPU 核数, 8)），HTTP 层同步返回"
 ，但提交→判题不串行阻塞 |
@@ -74,7 +74,7 @@
 |---|---|
 | UI-01 | 页面：登录/注册、题目列表（搜索+筛选）、题目页（详情+做题 左右分屏）、提交详情/历史、排行榜、后台管理（题目/用例/用户/Rejudge） |
 | UI-02 | 题目页（详情与做题合并，左右分屏）：**左侧**展示标题、难度、标签、题面描述、样例输入/输出（仅公开样例，隐藏用例绝不泄露）、时限/内存上限、本人该题 AC/未AC 状态；**右侧**为做题区，垂直分栏：CodeMirror 编辑器 + 提交按钮/语言选择 + 逐测试点结果 |
-| UI-03 | 做题区细节：CodeMirror 编辑器（C/C++ 语法高亮，CDN 引入），语言选择（C++17/C11），`Ctrl+Enter` 提交，提交后原地分屏展示逐测试点结果（含状态/耗时/内存） |
+| UI-03 | 做题区细节：CodeMirror 编辑器（C/C++ 语法高亮，CDN 引入），语言选择（C++17/C11），`Ctrl+Enter` 提交，提交后原地分屏展示逐测试点结果（状态/耗时/内存；**WA** 点额外展示输入 / 期望输出 / 你的输出） |
 | UI-04 | 前端无构建流程，原生资源由 cpp-httplib 静态托管；hash 路由；CodeMirror 从 CDN 引入 |
 | UI-05 | 题目列表对已登录用户显示本人 AC/未AC 状态标记 |
 | UI-06 | API 全部走 JSON；权限校验在后端完成（学生只能访问自己提交与可见题目） |
@@ -185,7 +185,7 @@ problems(id PK, title, description, difficulty TEXT,
 testcases(id PK, problem_id FK, ord INT, input TEXT, output TEXT)
 submissions(id PK, user_id FK, problem_id FK, language TEXT,
             source_code TEXT, status TEXT /*AC|WA|CE|TLE|RE|MLE|SYSERR*/,
-            per_case TEXT /*JSON 逐点结果*/, compile_msg TEXT,
+            per_case TEXT /*JSON 逐点结果，WA 点含输入/期望输出/用户输出*/, compile_msg TEXT,
             runtime_ms INT, memory_kb INT, created_at)
 user_problem_status(id PK, user_id FK, problem_id FK,
                     status TEXT /*'accepted'|'none'*/,
