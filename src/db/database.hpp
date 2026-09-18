@@ -2,14 +2,14 @@
 
 #include <sqlite3.h>
 
+#include <mutex>
 #include <string>
 
 namespace oj {
 
 // SQLite 连接封装：自动建目录/文件、开启 WAL、外键检查、busy_timeout、幂等建表。
 //
-// 本类不保证线程安全：外部应避免同一连接并发使用（SQLITE_OPEN_FULLMUTEX 作为兜底，
-// 后续若引入多个连接，每个连接都要单独做 Open 才会各自生效）。
+// 单连接 + 全局互斥锁：所有公共方法在锁内串行访问，供多线程 HTTP 层安全共用。
 class Database {
  public:
   Database() = default;
@@ -17,6 +17,9 @@ class Database {
 
   Database(const Database&) = delete;
   Database& operator=(const Database&) = delete;
+
+  // 锁定数据库（HTTP 处理器在多线程下访问时使用）。锁内可安全执行 sqlite3 调用。
+  std::unique_lock<std::mutex> Lock() { return std::unique_lock<std::mutex>(mutex_); }
 
   // 打开数据库（父目录与文件不存在时自动创建），并设置：
   //   journal_mode=WAL、foreign_keys=ON、busy_timeout、synchronous=NORMAL。
@@ -44,6 +47,7 @@ class Database {
 
   sqlite3* db_ = nullptr;
   std::string path_;
+  mutable std::mutex mutex_;
 };
 
 }  // namespace oj

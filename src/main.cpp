@@ -7,7 +7,10 @@
 #include "httplib.h"
 #include "nlohmann/json.hpp"
 
+#include "auth/jwt.hpp"
+#include "auth/rate_limit.hpp"
 #include "db/database.hpp"
+#include "http/routes.hpp"
 
 namespace {
 
@@ -120,6 +123,20 @@ int main(int argc, char** argv) {
     return 1;
   }
   admin_password.clear();
+
+  // JWT 签名密钥：每次进程启动生成随机密钥。重启会使已签发 token 失效，
+  // 需要重新登录（对教学规模无影响；M5 若需跨重启持续登录可改为持久化密钥）。
+  const std::string jwt_secret = oj::auth::GenerateJwtSecret();
+  if (jwt_secret.empty()) {
+    std::cerr << "[oj] fatal: cannot generate JWT secret" << "\n";
+    db.Close();
+    return 1;
+  }
+
+  // 登录限速：默认每账户+IP 窗口 5 分钟内最多 8 次失败。
+  oj::auth::LoginRateLimiter login_limiter;
+
+  oj::http::RegisterAuthRoutes(svr, db, jwt_secret, login_limiter);
 
   if (admin_rc == 1) {
     std::cout << "[oj] database ready at " << db_path
