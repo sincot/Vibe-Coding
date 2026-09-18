@@ -52,5 +52,18 @@ bool validate_password(const std::string &password, std::string &error) {
   return true;
 }
 
+bool validate_password_change(const std::string &old_password,
+                              const std::string &new_password,
+                              std::string &error) {
+  if (!validate_password(new_password, error)) {
+    return false;
+  }
+  if (new_password == old_password) {
+    error = "新密码不能与旧密码相同";
+    return false;
+  }
+  return true;
+}
+
 } // namespace auth
 } // namespace oj

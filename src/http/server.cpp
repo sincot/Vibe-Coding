@@ -6,7 +6,8 @@
 
 #include <nlohmann/json.hpp>
 
-#include "auth/register.h"
+#include "auth/password_change.h"
+#include "auth/validation.h"
 #include "log.h"
 
 namespace oj {
@@ -15,8 +16,8 @@ namespace {
 using nlohmann::json;
 
 // 统一 JSON 响应。错误约定（见 README）：
-//   注册成功 201；登录成功 200；非法输入 400；登录失败/无效认证 401；
-//   昵称冲突 409；限速 429；内部故障 500。
+//   注册成功 201；登录成功 200；非法输入 400；登录失败/无效认证/旧密码错误 401；
+//   昵称冲突 409；权限不足/必须先改密 403；限速 429；内部故障 500。
 // 错误响应体统一为 {"error": "..."}，且不泄露数据库/SQL/哈希/密钥/token 等内部细节。
 void send_json(httplib::Response &res, int status, const json &body) {
   res.status = status;
@@ -27,6 +28,15 @@ void send_error(httplib::Response &res, int status, const std::string &message) 
   json body;
   body["error"] = message;
   send_json(res, status, body);
+}
+
+// 必须先改密的错误响应：除 {"error": "..."} 外附加稳定错误码，供前端识别并
+// 跳转到改密流程。字段名与取值作为 API 约定固定，不随文案变化。
+void send_password_change_required(httplib::Response &res) {
+  json body;
+  body["error"] = "请先修改密码";
+  body["code"] = "PASSWORD_CHANGE_REQUIRED";
+  send_json(res, 403, body);
 }
 
 // 最小健康检查：确认服务存活并正常响应 JSON。
@@ -79,6 +89,56 @@ bool parse_login_body(const std::string &body, std::string &account,
   return true;
 }
 
+// 解析改密请求体，提取 old_password 与 new_password（均为非空字符串）。
+// 只读取这两个字段；用户身份由已验证的当前用户上下文决定，忽略客户端传入的
+// 任何 id / account / role 等字段，防止越权修改他人密码或提权。
+bool parse_password_change_body(const std::string &body, std::string &old_password,
+                                std::string &new_password,
+                                httplib::Response &res) {
+  json parsed;
+  try {
+    parsed = json::parse(body);
+  } catch (const std::exception &) {
+    send_error(res, 400, "请求体不是合法的 JSON");
+    return false;
+  }
+  if (!parsed.is_object()) {
+    send_error(res, 400, "请求体必须是 JSON 对象");
+    return false;
+  }
+  if (!parsed.contains("old_password") || !parsed["old_password"].is_string()) {
+    send_error(res, 400, "缺少字段或类型错误：old_password 须为字符串");
+    return false;
+  }
+  if (!parsed.contains("new_password") || !parsed["new_password"].is_string()) {
+    send_error(res, 400, "缺少字段或类型错误：new_password 须为字符串");
+    return false;
+  }
+  old_password = parsed["old_password"].get<std::string>();
+  new_password = parsed["new_password"].get<std::string>();
+  if (old_password.empty() || new_password.empty()) {
+    send_error(res, 400, "old_password 与 new_password 不能为空");
+    return false;
+  }
+  return true;
+}
+
+// 对已验证登录的用户执行管理员权限检查；不满足时设置响应并返回 false。
+// 组合了「具备 admin 角色」与「已完成必要改密」两项要求（登录已由调用方保证）。
+bool enforce_admin(const auth::AuthUser &user, httplib::Response &res) {
+  switch (auth::check_admin(user)) {
+    case auth::AdminCheck::Ok:
+      return true;
+    case auth::AdminCheck::NotAdmin:
+      send_error(res, 403, "权限不足");
+      return false;
+    case auth::AdminCheck::PasswordChangeRequired:
+      send_password_change_required(res);
+      return false;
+  }
+  return false;
+}
+
 // 构造不含敏感字段的用户信息 JSON（绝不包含 password_hash）。
 json public_user_json(const auth::AuthUser &user) {
   json j;
@@ -103,7 +163,7 @@ json public_user_json(const UserRecord &user) {
 } // namespace
 
 HttpServer::HttpServer(std::string host, int port, Database &db,
-                       auth::JwtConfig jwt_config)
+                       auth::JwtConfig jwt_config, bool enable_test_routes)
     : host_(std::move(host)),
       port_(port),
       db_(db),
@@ -112,7 +172,9 @@ HttpServer::HttpServer(std::string host, int port, Database &db,
       rate_limiter_(auth::RateLimiter::Config{}),
       account_gen_(),
       register_service_(db, account_gen_),
-      login_service_(db, jwt_) {
+      login_service_(db, jwt_),
+      change_password_service_(db),
+      enable_test_routes_(enable_test_routes) {
   svr_.set_socket_options(configure_socket);
 }
 
@@ -158,9 +220,23 @@ void HttpServer::setup_routes() {
     handle_login(req, res);
   });
   svr_.Get("/api/me", [this](const httplib::Request &req,
-                             httplib::Response &res) {
+                              httplib::Response &res) {
     handle_me(req, res);
   });
+  svr_.Post("/api/me/password", [this](const httplib::Request &req,
+                                       httplib::Response &res) {
+    handle_change_password(req, res);
+  });
+
+  // 测试专用路由：仅 enable_test_routes_ 为 true（集成测试）时注册，
+  // 用于在正式管理员业务接口落地前验证管理员权限与首次改密限制的组合行为。
+  // 正式服务以 false 启动，不会暴露此入口。
+  if (enable_test_routes_) {
+    svr_.Get("/api/test/admin-only", [this](const httplib::Request &req,
+                                            httplib::Response &res) {
+      handle_test_admin_only(req, res);
+    });
+  }
 }
 
 void HttpServer::handle_register(const httplib::Request &req,
@@ -277,6 +353,95 @@ void HttpServer::handle_me(const httplib::Request &req, httplib::Response &res) 
       send_error(res, 500, "内部错误");
       return;
   }
+}
+
+void HttpServer::handle_change_password(const httplib::Request &req,
+                                        httplib::Response &res) {
+  // 先完成登录校验，目标用户来自已验证的当前用户上下文（token 验证 + 数据库
+  // 回查），客户端传入的 id / account 等字段一律被忽略。
+  std::string token;
+  if (!auth::extract_bearer_token(req.get_header_value("Authorization"), token)) {
+    send_error(res, 401, "未提供有效的认证信息");
+    return;
+  }
+
+  auth::AuthUser user;
+  std::string err;
+  switch (auth::authenticate_request(jwt_, user_store_, token, user, err)) {
+    case auth::AuthResult::Ok:
+      break;
+    case auth::AuthResult::Unauthorized:
+      send_error(res, 401, "认证失败");
+      return;
+    case auth::AuthResult::InternalError:
+      send_error(res, 500, "内部错误");
+      return;
+  }
+
+  std::string old_password;
+  std::string new_password;
+  if (!parse_password_change_body(req.body, old_password, new_password, res)) {
+    return;
+  }
+
+  // 复用注册密码规则校验新密码，并要求新密码与旧密码不同；不做任何裁剪/截断。
+  std::string validation_err;
+  if (!auth::validate_password_change(old_password, new_password,
+                                      validation_err)) {
+    send_error(res, 400, validation_err);
+    return;
+  }
+
+  auto result =
+      change_password_service_.change_password(user.id, old_password,
+                                               new_password);
+  switch (result.outcome) {
+    case auth::ChangePasswordService::Outcome::Success: {
+      json resp;
+      resp["status"] = "ok";
+      send_json(res, 200, resp);
+      return;
+    }
+    case auth::ChangePasswordService::Outcome::InvalidOldPassword:
+      send_error(res, 401, "旧密码错误");
+      return;
+    case auth::ChangePasswordService::Outcome::UserNotFound:
+      send_error(res, 401, "认证失败");
+      return;
+    case auth::ChangePasswordService::Outcome::InternalError:
+      send_error(res, 500, "内部错误");
+      return;
+  }
+}
+
+void HttpServer::handle_test_admin_only(const httplib::Request &req,
+                                        httplib::Response &res) {
+  std::string token;
+  if (!auth::extract_bearer_token(req.get_header_value("Authorization"), token)) {
+    send_error(res, 401, "未提供有效的认证信息");
+    return;
+  }
+
+  auth::AuthUser user;
+  std::string err;
+  switch (auth::authenticate_request(jwt_, user_store_, token, user, err)) {
+    case auth::AuthResult::Ok:
+      break;
+    case auth::AuthResult::Unauthorized:
+      send_error(res, 401, "认证失败");
+      return;
+    case auth::AuthResult::InternalError:
+      send_error(res, 500, "内部错误");
+      return;
+  }
+
+  if (!enforce_admin(user, res)) {
+    return;
+  }
+
+  json resp;
+  resp["status"] = "ok";
+  send_json(res, 200, resp);
 }
 
 } // namespace oj

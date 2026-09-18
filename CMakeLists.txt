@@ -83,6 +83,8 @@ add_library(oj_core STATIC
   src/auth/rate_limit.cpp
   src/auth/login.cpp
   src/auth/context.cpp
+  src/auth/authorize.cpp
+  src/auth/password_change.cpp
 )
 
 target_include_directories(oj_core PUBLIC
@@ -184,3 +186,21 @@ add_executable(oj_login_api_test
 target_link_libraries(oj_login_api_test PRIVATE oj_core)
 
 add_test(NAME login_api COMMAND oj_login_api_test)
+
+# 改密与权限检查单元测试（改密校验、首次改密检查、管理员权限检查、改密服务）。
+add_executable(oj_password_test
+  tests/unit/test_password_change.cpp
+)
+
+target_link_libraries(oj_password_test PRIVATE oj_core)
+
+add_test(NAME password_unit COMMAND oj_password_test)
+
+# 改密与权限检查集成测试（真实 HTTP 服务 + 隔离临时库 + 测试密钥 + 测试路由）。
+add_executable(oj_password_api_test
+  tests/integration/test_password_api.cpp
+)
+
+target_link_libraries(oj_password_api_test PRIVATE oj_core)
+
+add_test(NAME password_api COMMAND oj_password_api_test)

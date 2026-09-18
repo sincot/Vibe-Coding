@@ -56,6 +56,18 @@ public:
                       const std::string &password_hash, UserRecord &out,
                       std::string &error);
 
+  enum class UpdatePasswordStatus {
+    Success,  // 更新成功（密码哈希已替换，首次改密标记已清除）
+    NotFound, // 目标用户不存在
+    Error,    // 其它数据库错误，error 非空
+  };
+
+  // 原子更新指定用户的密码哈希并清除首次改密标记（单条 UPDATE，两字段同时生效）。
+  // 仅更新密码哈希与标记，不读取也不校验旧密码——旧密码校验由调用方在事务内完成。
+  UpdatePasswordStatus update_password(std::int64_t id,
+                                       const std::string &new_hash,
+                                       std::string &error);
+
 private:
   Database &db_;
 };

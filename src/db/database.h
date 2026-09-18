@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include <sqlite3.h>
@@ -89,6 +90,12 @@ public:
   bool commit(std::string &error);
   bool rollback(std::string &error);
 
+  // 事务互斥锁：连接以 FULLMUTEX（serialized）打开，仅保证「单条语句」的原子性；
+  // 跨越 begin/commit 的多语句事务在同一连接上仍会因并发交错而被破坏（如
+  // 并发发起 BEGIN IMMEDIATE 会报「事务内再开事务」）。需要多语句事务的代码
+  // （如改密服务）应在整个事务期间持有此锁，将事务整体串行化。
+  std::mutex &transaction_mutex() { return transaction_mutex_; }
+
   // 最近一次语句执行后的扩展错误码（连接已启用 extended result codes）。
   // 用于区分具体的约束违反类型，例如 SQLITE_CONSTRAINT_UNIQUE。
   int extended_errcode() const;
@@ -104,6 +111,7 @@ private:
 
   sqlite3 *db_ = nullptr;
   std::string path_;
+  std::mutex transaction_mutex_;
 };
 
 } // namespace oj

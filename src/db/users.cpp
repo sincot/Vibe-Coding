@@ -132,4 +132,32 @@ UserStore::CreateStatus UserStore::create(const std::string &account,
   return CreateStatus::Error;
 }
 
+UserStore::UpdatePasswordStatus
+UserStore::update_password(std::int64_t id, const std::string &new_hash,
+                           std::string &error) {
+  // 单条 UPDATE 同时写入 password_hash 与 reset_pwd_flag=0，保证两者原子生效；
+  // 使用 RETURNING 区分「更新成功」与「目标用户不存在」。
+  Statement stmt;
+  if (!db_.prepare(
+          "UPDATE users SET password_hash = ?, reset_pwd_flag = 0 WHERE id = ? "
+          "RETURNING id",
+          stmt, error)) {
+    return UpdatePasswordStatus::Error;
+  }
+  if (!stmt.bind(1, new_hash) ||
+      !stmt.bind(2, static_cast<sqlite3_int64>(id))) {
+    error = stmt.errmsg();
+    return UpdatePasswordStatus::Error;
+  }
+  int rc = stmt.step();
+  if (rc == SQLITE_ROW) {
+    return UpdatePasswordStatus::Success;
+  }
+  if (rc == SQLITE_DONE) {
+    return UpdatePasswordStatus::NotFound;
+  }
+  error = stmt.errmsg();
+  return UpdatePasswordStatus::Error;
+}
+
 } // namespace oj

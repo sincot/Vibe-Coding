@@ -26,5 +26,12 @@ bool validate_nickname(const std::string &input, std::string &normalized,
 // 成功返回 true；失败返回 false 并写入用户可读信息。
 bool validate_password(const std::string &password, std::string &error);
 
+// 校验改密的新密码：复用注册密码规则（见 validate_password），并额外要求
+// 新密码不得与旧密码相同，避免首次强制改密流于形式。新密码不做任何裁剪或截断。
+// 成功返回 true；失败返回 false 并写入用户可读信息。
+bool validate_password_change(const std::string &old_password,
+                              const std::string &new_password,
+                              std::string &error);
+
 } // namespace auth
 } // namespace oj
