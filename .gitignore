@@ -1,5 +1,55 @@
+# ---- 构建产物 ----
 build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
 *.o
-data/*.db
-data/*.db-wal
-data/*.db-shm
+*.obj
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+oj-server
+
+# ---- 运行数据库与备份（保留目录占位文件） ----
+data/*
+!data/.gitkeep
+backup/*
+!backup/.gitkeep
+*.sqlite
+*.sqlite3
+
+# ---- 临时文件与日志 ----
+tmp/
+.tmp/
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+*.log
+
+# ---- 敏感配置（保留 *.example / *.sample / *.template 示例） ----
+.env
+.env.*
+*.env
+config.local.*
+secrets.*
+*.pem
+*.key
+*.crt
+!.env.example
+!*.env.example
+!*.example
+!*.sample
+!*.template
+
+# ---- 编辑器 / IDE ----
+.vscode/
+.idea/
+*.code-workspace
+.cache/

@@ -270,8 +270,8 @@ Vibe-Coding/
 
 #### M0.1 项目结构
 - [x] `git init`，约定目录结构（`src/`、`web/`、`scripts/`、`data/`、`tests/`）
-- [ ] 配置忽略规则，排除构建产物、运行数据库、临时文件和敏感配置
-- [ ] 整理 `dependence.md`，记录依赖与安装方式
+- [x] 配置忽略规则，排除构建产物、运行数据库、临时文件和敏感配置
+- [x] 整理 `dependence.md`，记录依赖与安装方式
 
 #### M0.2 构建与 HTTP 服务
 - [x] 编写 CMake 配置，接入 cpp-httplib，生成后端可执行程序
