@@ -6,7 +6,12 @@
 
 #include <httplib.h>
 
+#include "auth/account.h"
+#include "auth/register.h"
+
 namespace oj {
+
+class Database;
 
 // HTTP 服务封装：注册路由、启动监听、优雅停止。
 //
@@ -16,7 +21,7 @@ namespace oj {
 // 使循环退出并回收线程资源。
 class HttpServer {
 public:
-  HttpServer(std::string host, int port);
+  HttpServer(std::string host, int port, Database &db);
   ~HttpServer();
 
   HttpServer(const HttpServer &) = delete;
@@ -32,9 +37,13 @@ public:
 
 private:
   void setup_routes();
+  void handle_register(const httplib::Request &req, httplib::Response &res);
 
   std::string host_;
   int port_;
+  Database &db_;
+  auth::RandomAccountGenerator account_gen_;
+  auth::RegisterService register_service_;
   httplib::Server svr_;
   std::thread listen_thread_;
   std::atomic<bool> running_{false};

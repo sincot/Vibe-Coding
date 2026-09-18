@@ -52,15 +52,21 @@ if(NOT ARGON2_INCLUDE_DIR OR NOT ARGON2_LIBRARY)
     "未找到 argon2。请安装 libargon2-dev（参见 dependence.md）。")
 endif()
 
-add_executable(oj_server
-  src/main.cpp
+# ---------------------------------------------------------------------------
+# 核心静态库：数据库、认证与 HTTP 层（除程序入口外），供服务与测试复用。
+# ---------------------------------------------------------------------------
+add_library(oj_core STATIC
   src/http/server.cpp
   src/db/database.cpp
   src/db/schema.cpp
+  src/db/users.cpp
   src/auth/password.cpp
+  src/auth/account.cpp
+  src/auth/validation.cpp
+  src/auth/register.cpp
 )
 
-target_include_directories(oj_server PRIVATE
+target_include_directories(oj_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${HTTPLIB_INCLUDE_DIR}
   ${JSON_INCLUDE_DIR}
@@ -68,18 +74,24 @@ target_include_directories(oj_server PRIVATE
   ${ARGON2_INCLUDE_DIR}
 )
 
-target_compile_definitions(oj_server PRIVATE
+target_compile_definitions(oj_core PUBLIC
   CPPHTTPLIB_OPENSSL_SUPPORT
   CPPHTTPLIB_ZLIB_SUPPORT
   CPPHTTPLIB_BROTLI_SUPPORT
 )
 
-target_link_libraries(oj_server PRIVATE
+target_link_libraries(oj_core PUBLIC
   ${HTTPLIB_LIBRARY}
   ${SQLITE3_LIBRARY}
   ${ARGON2_LIBRARY}
   Threads::Threads
 )
+
+add_executable(oj_server
+  src/main.cpp
+)
+
+target_link_libraries(oj_server PRIVATE oj_core)
 
 # ---------------------------------------------------------------------------
 # 测试（CTest）
@@ -106,3 +118,21 @@ target_link_libraries(oj_db_test PRIVATE
 )
 
 add_test(NAME db_integration COMMAND oj_db_test)
+
+# 注册核心逻辑单元测试（账号生成、校验、注册服务，含确定性账号碰撞模拟）。
+add_executable(oj_register_test
+  tests/unit/test_register.cpp
+)
+
+target_link_libraries(oj_register_test PRIVATE oj_core)
+
+add_test(NAME register_unit COMMAND oj_register_test)
+
+# 注册接口与数据库集成测试（通过 httplib::Client 访问真实 HTTP 服务）。
+add_executable(oj_register_api_test
+  tests/integration/test_register_api.cpp
+)
+
+target_link_libraries(oj_register_api_test PRIVATE oj_core)
+
+add_test(NAME register_api COMMAND oj_register_api_test)

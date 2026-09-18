@@ -148,6 +148,9 @@ bool Database::configure(std::string &error) {
   if (!exec("PRAGMA busy_timeout = 5000;", error)) {
     return false;
   }
+  // 启用扩展结果码，使 sqlite3_step 之后可通过 sqlite3_extended_errcode 区分
+  // 具体的约束违反类型（如 UNIQUE 冲突），供注册等路径精确识别账号/昵称碰撞。
+  sqlite3_extended_result_codes(db_, 1);
   return true;
 }
 
@@ -184,6 +187,10 @@ bool Database::commit(std::string &error) {
 
 bool Database::rollback(std::string &error) {
   return exec("ROLLBACK;", error);
+}
+
+int Database::extended_errcode() const {
+  return db_ != nullptr ? sqlite3_extended_errcode(db_) : SQLITE_ERROR;
 }
 
 void Database::close() {

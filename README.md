@@ -8,8 +8,9 @@
 - [x] M0.1 项目结构
 - [x] M0.2 构建与 HTTP 服务（CMake 接入 cpp-httplib，`GET /api/health` 健康检查，优雅停止）
 - [x] M0.3 数据库基础（SQLite 接入、五张业务表建表 + 约束/索引、WAL 与外键、首次启动自动初始化、argon2id 预置 admin、生命周期接入）
+- [x] M1.1 注册（10 位随机账号分配 + 昵称唯一性 + argon2id 密码哈希 + `POST /api/register`）
 
-后续阶段（认证、题目、判题、前端）尚未实现。
+后续阶段（登录/JWT、题目、判题、前端）尚未实现。
 
 ## 环境要求
 
@@ -40,8 +41,18 @@ cmake --build build -j
 ctest --test-dir build -R db_integration --output-on-failure
 ```
 
+注册单元测试与接口集成测试（同样使用隔离临时库与随机端口，不触碰正式数据库）：
+
+```bash
+ctest --test-dir build -R register_unit --output-on-failure
+ctest --test-dir build -R register_api --output-on-failure
+# 或一次性运行全部测试
+ctest --test-dir build --output-on-failure
+```
+
 覆盖建表与预置 admin、WAL / 外键、唯一性约束、非法外键、密码哈希、重复初始化幂等、
-持久化及失败路径。
+持久化及失败路径；以及注册成功、重复昵称、账号碰撞重试/耗尽、非法输入、越权字段、
+并发同昵称、内部故障不泄露、持久化等。
 
 ## 运行
 
@@ -91,6 +102,45 @@ Content-Type: application/json
 
 {"status":"ok"}
 ```
+
+### 注册接口
+
+`POST /api/register`（公开，无需登录），请求体为 JSON，仅读取 `nickname` 与 `password`：
+
+```bash
+curl -i -X POST http://127.0.0.1:8080/api/register \
+  -H 'Content-Type: application/json' \
+  -d '{"nickname":"alice","password":"Secret123"}'
+```
+
+成功响应（`201`）：
+
+```
+HTTP/1.1 201 Created
+Content-Type: application/json
+
+{"account":"3084523017","id":2,"nickname":"alice","role":"user"}
+```
+
+- `account`：后端随机分配的 10 位纯数字账号（字符串，首位允许为 0），一次性分配、永久不复用。
+- `role` 固定为 `user`；`account`/`role` 由后端控制，客户端传入的 `role`、`account` 等字段一律被忽略，无法提权或指定账号。
+- 响应不包含密码或其哈希；服务端仅保存 argon2id 哈希。
+
+输入规则：
+
+| 字段 | 类型 | 规则 |
+|---|---|---|
+| `nickname` | string | 去除首尾空白后非空、长度 ≤ 30（去空白后计）；内部空白保留；全局唯一 |
+| `password` | string | 非空、长度 ≤ 128；不裁剪不截断，空白视为有效内容 |
+
+错误约定（响应体统一为 `{"error":"..."}`，内部故障返回通用文案，不泄露数据库细节）：
+
+| 状态码 | 含义 |
+|---|---|
+| `201` | 注册成功 |
+| `400` | 非法输入：JSON 解析失败、字段缺失/类型错误、非法昵称或密码 |
+| `409` | 昵称已被使用（含并发冲突） |
+| `500` | 内部故障 |
 
 ### 停止服务
 

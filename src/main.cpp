@@ -165,7 +165,7 @@ int main(int argc, char **argv) {
   }
   oj::log(oj::LogLevel::Info, "数据库结构初始化完成");
 
-  oj::HttpServer server(cfg.host, cfg.port);
+  oj::HttpServer server(cfg.host, cfg.port, *db);
   if (!server.start(error)) {
     oj::log(oj::LogLevel::Error, "启动失败: " + error);
     return 1;

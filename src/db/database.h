@@ -89,6 +89,10 @@ public:
   bool commit(std::string &error);
   bool rollback(std::string &error);
 
+  // 最近一次语句执行后的扩展错误码（连接已启用 extended result codes）。
+  // 用于区分具体的约束违反类型，例如 SQLITE_CONSTRAINT_UNIQUE。
+  int extended_errcode() const;
+
   // 主动关闭连接（幂等）；析构时也会自动关闭。
   void close();
 
