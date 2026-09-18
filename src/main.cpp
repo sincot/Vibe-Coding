@@ -1,19 +1,34 @@
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <thread>
 
+#include "db/database.h"
+#include "db/schema.h"
 #include "http/server.h"
 #include "log.h"
 
 namespace {
 
-// 基础配置：仅包含监听地址与端口，均提供默认值。
+// 基础配置：监听地址、端口与数据库路径，均提供默认值。
 struct Config {
   std::string host = "0.0.0.0";
   int port = 8080;
+  std::string db_path = "data/oj.db";
 };
+
+// 初始管理员密码通过环境变量 OJ_ADMIN_PASSWORD 提供，不写入源码、版本控制
+// 或日志。仅当数据库中还没有 admin 时才读取并使用；已有 admin 时无需设置。
+std::optional<std::string> read_admin_password() {
+  const char *value = std::getenv("OJ_ADMIN_PASSWORD");
+  if (value == nullptr) {
+    return std::nullopt;
+  }
+  return std::string(value);
+}
 
 // 仅用于在信号处理函数中写入的标志位：volatile sig_atomic_t 保证异步信号安全，
 // 信号处理函数不调用任何日志或复杂清理逻辑。
@@ -24,10 +39,16 @@ extern "C" void handle_signal(int sig) {
 }
 
 void print_usage(std::ostream &os, const char *prog) {
-  os << "用法: " << prog << " [--host <地址>] [--port <端口>] [--help]\n"
+  os << "用法: " << prog
+     << " [--host <地址>] [--port <端口>] [--db <路径>] [--help]\n"
      << "  --host  监听地址，默认 0.0.0.0\n"
      << "  --port  监听端口，默认 8080（范围 1-65535）\n"
-     << "  --help  显示本帮助\n";
+     << "  --db    SQLite 数据库路径，默认 data/oj.db\n"
+     << "  --help  显示本帮助\n"
+     << "\n"
+     << "环境变量:\n"
+     << "  OJ_ADMIN_PASSWORD  首次初始化（尚无 admin）时预置的管理员初始密码；\n"
+     << "                     已有 admin 时无需设置。\n";
 }
 
 bool parse_port(const std::string &text, int &out) {
@@ -89,6 +110,19 @@ bool parse_args(int argc, char **argv, Config &cfg, bool &want_help) {
       continue;
     }
 
+    if (arg == "--db") {
+      if (i + 1 >= argc) {
+        std::cerr << "错误: --db 需要一个参数\n";
+        return false;
+      }
+      cfg.db_path = argv[++i];
+      if (cfg.db_path.empty()) {
+        std::cerr << "错误: --db 参数不能为空\n";
+        return false;
+      }
+      continue;
+    }
+
     std::cerr << "错误: 未知参数 \"" << arg << "\"\n";
     return false;
   }
@@ -115,8 +149,23 @@ int main(int argc, char **argv) {
 
   oj::log(oj::LogLevel::Info, "oj_server 正在启动...");
 
-  oj::HttpServer server(cfg.host, cfg.port);
+  // 数据库初始化在 HTTP 服务开始监听前完成。数据库对象先于 server 声明，
+  // 从而保证退出时按「HTTP 先停止、数据库后释放」的顺序析构。
   std::string error;
+  auto db = oj::Database::open(cfg.db_path, error);
+  if (!db) {
+    oj::log(oj::LogLevel::Error, "数据库初始化失败: " + error);
+    return 1;
+  }
+  oj::log(oj::LogLevel::Info, "数据库已打开: " + cfg.db_path);
+
+  if (!oj::initialize_schema(*db, read_admin_password(), error)) {
+    oj::log(oj::LogLevel::Error, "数据库初始化失败: " + error);
+    return 1;
+  }
+  oj::log(oj::LogLevel::Info, "数据库结构初始化完成");
+
+  oj::HttpServer server(cfg.host, cfg.port);
   if (!server.start(error)) {
     oj::log(oj::LogLevel::Error, "启动失败: " + error);
     return 1;
@@ -138,6 +187,8 @@ int main(int argc, char **argv) {
               "，正在优雅停止...");
   server.stop();
   oj::log(oj::LogLevel::Info, "HTTP 服务已停止");
+  db->close();
+  oj::log(oj::LogLevel::Info, "数据库资源已释放");
 
   return 0;
 }

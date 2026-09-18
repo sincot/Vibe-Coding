@@ -32,15 +32,40 @@ if(NOT JSON_INCLUDE_DIR)
     "未找到 nlohmann/json。请安装 nlohmann-json3-dev（参见 dependence.md）。")
 endif()
 
+# ---------------------------------------------------------------------------
+# SQLite（Ubuntu 22.04 的 libsqlite3-dev，提供 sqlite3.h 与 libsqlite3）
+# ---------------------------------------------------------------------------
+find_path(SQLITE3_INCLUDE_DIR sqlite3.h)
+find_library(SQLITE3_LIBRARY NAMES sqlite3)
+if(NOT SQLITE3_INCLUDE_DIR OR NOT SQLITE3_LIBRARY)
+  message(FATAL_ERROR
+    "未找到 SQLite。请安装 libsqlite3-dev（参见 dependence.md）。")
+endif()
+
+# ---------------------------------------------------------------------------
+# argon2（Ubuntu 22.04 的 libargon2-dev，提供 argon2.h 与 libargon2）
+# ---------------------------------------------------------------------------
+find_path(ARGON2_INCLUDE_DIR argon2.h)
+find_library(ARGON2_LIBRARY NAMES argon2)
+if(NOT ARGON2_INCLUDE_DIR OR NOT ARGON2_LIBRARY)
+  message(FATAL_ERROR
+    "未找到 argon2。请安装 libargon2-dev（参见 dependence.md）。")
+endif()
+
 add_executable(oj_server
   src/main.cpp
   src/http/server.cpp
+  src/db/database.cpp
+  src/db/schema.cpp
+  src/auth/password.cpp
 )
 
 target_include_directories(oj_server PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${HTTPLIB_INCLUDE_DIR}
   ${JSON_INCLUDE_DIR}
+  ${SQLITE3_INCLUDE_DIR}
+  ${ARGON2_INCLUDE_DIR}
 )
 
 target_compile_definitions(oj_server PRIVATE
@@ -51,5 +76,33 @@ target_compile_definitions(oj_server PRIVATE
 
 target_link_libraries(oj_server PRIVATE
   ${HTTPLIB_LIBRARY}
+  ${SQLITE3_LIBRARY}
+  ${ARGON2_LIBRARY}
   Threads::Threads
 )
+
+# ---------------------------------------------------------------------------
+# 测试（CTest）
+# ---------------------------------------------------------------------------
+enable_testing()
+
+add_executable(oj_db_test
+  tests/integration/test_db.cpp
+  src/db/database.cpp
+  src/db/schema.cpp
+  src/auth/password.cpp
+)
+
+target_include_directories(oj_db_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${SQLITE3_INCLUDE_DIR}
+  ${ARGON2_INCLUDE_DIR}
+)
+
+target_link_libraries(oj_db_test PRIVATE
+  ${SQLITE3_LIBRARY}
+  ${ARGON2_LIBRARY}
+  Threads::Threads
+)
+
+add_test(NAME db_integration COMMAND oj_db_test)

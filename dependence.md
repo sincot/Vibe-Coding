@@ -133,3 +133,30 @@ mount | grep oj-tmpfs
 - 前端：原生 HTML/CSS/JS + CodeMirror（CDN 引入，UI-04），无构建流程、无需安装。
 - JWT 逻辑、argon 哈希调用、判题器、Rejudge、日志等均为本项目代码实现。
 - tmpfs 挂载与 cron 定时任务属于运行时配置，非软件安装。
+
+---
+
+## 6. 数据库运行说明（M0.3 起）
+
+### 6.1 数据库路径
+
+- 默认 `data/oj.db`（相对启动目录），可用 `--db <路径>` 覆盖。
+- 首次启动自动创建父目录、数据库文件及表结构；重复启动复用已有数据，不会删表重建。
+
+### 6.2 连接与事务配置
+
+- 每个连接开启 `PRAGMA journal_mode=WAL`、`PRAGMA synchronous=NORMAL`、
+  `PRAGMA foreign_keys=ON`，并设置 `PRAGMA busy_timeout=5000`（锁等待 5 秒）。
+- 连接以 `SQLITE_OPEN_FULLMUTEX`（serialized）模式打开，单个长连接可被多线程安全共享；
+  服务进程生命周期内持有一个连接，HTTP 并发访问时无需也不应新建/乱序共享连接。
+
+### 6.3 初始管理员密码
+
+- 首次初始化且数据库中尚无 `admin` 时，通过环境变量 `OJ_ADMIN_PASSWORD` 提供初始密码，
+  密码只以 argon2id 哈希落库，不写入源码、版本控制或日志。
+- 数据库中已有 `admin` 时无需（也不会）再要求该变量，重复初始化不覆盖密码、不重置首次改密标记。
+
+### 6.4 依赖
+
+数据库（`libsqlite3-dev`）与密码哈希（`libargon2-dev`）在 3.2 / 3.4 节已列出，
+安装命令见对应小节；无额外新增系统包。
