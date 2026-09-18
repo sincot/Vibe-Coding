@@ -1,0 +1,261 @@
+# SPEC — 仿 LeetCode 在线判题系统（OJ）
+
+> 版本：v0.1  状态：已确认定稿
+> 后端：C++（cpp-httplib）  前端：原生 HTML/CSS/JS + CodeMirror  存储：SQLite
+
+---
+
+## 1. 项目概述
+
+一个面向**教学班（数十人同时）**的仿 LeetCode 在线判题系统。发布题目 → 学生浏览/做题 → 在线判题（标准 ACM 模式）→ 保存提交记录与做题状态 → 排行榜。项目由 Vibe-Coding 协作完成。
+
+### 成功标准
+- 功能完整、可在一台 Linux 机器上一键运行。
+- 核心链路端到端跑通：注册 → 看题 → 提交 → 判题 → 反馈 → 排行榜。
+- 判题安全：不可信用户代码在进程级沙箱中执行，恶意提交最多拖垮自身，不影响系统与他人。
+
+---
+
+## 2. 需求规格
+
+### 2.1 用户与权限
+| 编号 | 需求 |
+|---|---|
+| AUTH-01 | 公开注册：系统**随机分配一个 10 位纯数字账号**，该账号一次性分配、绝不重复分配；用户同时自定义唯一昵称与密码 |
+| AUTH-02 | `nickname` 全局唯一，重复则注册失败 |
+| AUTH-03 | 密码仅存哈希（argon2id/bcrypt），不落明文 |
+| AUTH-04 | 会话采用 JWT，前端随请求携带；登录接口做限速防爆破 |
+| AUTH-05 | 预置管理员账号（`admin`），首次登录强制改密 |
+| ROLE-01 | 普通用户：仅可查看可见题目、做题、查看**本人**提交记录与做题状态标记 |
+| ROLE-02 | 管理员：题目增删改查、测试用例管理、Rejudge、用户管理、题目可见性控制；管理员也可做题 |
+
+### 2.2 题库
+| 编号 | 需求 |
+|---|---|
+| PRB-01 | 题目元数据：标题、描述、样例输入/输出、多组测试用例（输入文本/输出文本）、难度（易/中/难）、标签、时限(ms)、内存上限(KB) |
+| PRB-02 | 时限/内存上限有默认值（默认 2s / 64MB），按题可覆盖；备注：因 ASan 判题时延显著，默认放宽到 2s 并建议出题者按题校准 |
+| PRB-03 | 题面为纯文本（先不做 Markdown 渲染）；测试用例支持文本粘贴逐点录入/编辑/删除 |
+| PRB-04 | 题目前端支持搜索 + 难度/标签筛选 |
+| PRB-05 | 隐藏用例绝不泄露给学生；题目详情只返回样例 |
+
+### 2.3 判题系统（核心）
+| 编号 | 需求 |
+|---|---|
+| JUDGE-01 | 支持语言：C++17（`g++ -O2 -std=c++17`，带 `-lm`）+ ASan/UBSan 全开；C11（`gcc -O2 -std=c11 -lm`）+ ASan/UBSan 全开 |
+| JUDGE-02 | 每次提交**创建一个独立子进程**执行，主线程 watchdog 超时 `SIGKILL` 强杀并 `waitpid` 回收，不留僵尸 |
+| JUDGE-03 | 沙箱：进程级隔离（fork + `setrlimit`），seccomp-bpf 禁用 `socket()`/`open()` 等危险系统调用（禁网络 / 禁读写文件 / 禁读 /proc） |
+| JUDGE-04 | 运行目录：tmpfs 下一次性随机目录，仅本次提交可见，用后即销毁 |
+| JUDGE-05 | 输出字节上限 64KB（防刷屏打爆磁盘） |
+| JUDGE-06 | AC 判定：去除每行行尾空白与文末空行后逐字符比对 |
+| JUDGE-07 | **全部测试点跑完**后汇总反馈，逐测试点结果可见 |
+| JUDGE-08 | 状态机：`AC` / `WA` / `CE`(编译错误) / `TLE`(超时) / `RE`(运行错误/崩溃) / `MLE`(超内存) / `SYSERR`(系统内部错误) |
+| JUDGE-09 | 判题在线程池中执行（worker 数 = min(CPU 核数, 8)），HTTP 层同步返回"
+，但提交→判题不串行阻塞 |
+| JUDGE-10 | 全局兜底：即使题目时限配置为无限大，单次判题硬上限（如 60s）强杀 |
+| JUDGE-11 | 每次提交完整结果（状态、逐点结果、编译信息、耗时/内存）写入持久化日志 |
+| JUDGE-12 | 判题进程异常（如编译环境故障）标记为 `SYSERR`，不假死，用户可重试 |
+
+### 2.4 提交与做题记录（全部持久化）
+| 编号 | 需求 |
+|---|---|
+| PERS-01 | `submissions`：提交 ID、用户、题目、语言、**完整用户源码**、状态、逐测试点结果、编译信息、耗时/内存、时间戳 —— 全部落 SQLite |
+| PERS-02 | `user_problem_status`：用户×题目 的 AC/未AC 状态、首次 AC 时间、提交次数 —— 供题目列表状态标记与排行榜 |
+| PERS-03 | 重启不丢数据；SQLite 开启 WAL |
+| PERS-04 | cron 定期 `sqlite3 .dump` 备份（保留在交付清单） |
+
+### 2.5 排行榜
+| 编号 | 需求 |
+|---|---|
+| RANK-01 | 排序：AC 数↓ → 总提交次数↑ → 首次 AC 时间戳↑ → 注册时间↑ |
+| RANK-02 | 需要记录并持久化：每人 AC 数、总提交次数、首次 AC 时间戳 |
+
+### 2.6 前端页面与交互
+| 编号 | 需求 |
+|---|---|
+| UI-01 | 页面：登录/注册、题目列表（搜索+筛选）、题目详情页、做题页、提交详情/历史、排行榜、后台管理（题目/用例/用户/Rejudge） |
+| UI-06 | 题目详情页：展示标题、难度、标签、题面描述、样例输入/输出（仅公开样例，隐藏用例绝不泄露）、时限/内存上限；对已登录用户显示本人该题 AC/未AC 状态，提供「去做题」入口进入做题页，并列出本人该题近期提交历史 |
+| UI-02 | 做题页：CodeMirror 编辑器（C/C++ 语法高亮），`Ctrl+Enter` 提交，分屏展示逐测试点结果 |
+| UI-03 | 前端无构建流程，原生资源由 cpp-httplib 静态托管；hash 路由；CodeMirror 从 CDN 引入 |
+| UI-04 | 题目列表对已登录用户显示本人 AC/未AC 状态标记 |
+| UI-05 | API 全部走 JSON；权限校验在后端完成（学生只能访问自己提交与可见题目） |
+
+### 2.7 非功能需求
+| 类别 | 要求 |
+|---|---|
+| 性能 | 教学班数十人同时提交，单机可扛；同步返回足够快（一个典型提交 < 数秒） |
+| 安全 | JWT + 密码哈希；admin 首登强制改密；seccomp 禁网络/文件；tmpfs 目录隔离；登录限速；输出限长 |
+| 可靠性 | SYSERR 不假死；子进程必回收；WAL + cron 备份 |
+| 日志 | 提交结果全量落库；服务侧运行日志 |
+| 可维护 | 判题器抽象 `IExecutor` 接口（sandbox 策略可替换），判题核心可单测 |
+
+---
+
+## 3. 系统架构
+
+### 3.1 架构图
+
+```
+┌─────────────────────────────────────────────┐
+│  Browser（原生 HTML/CSS/JS + CodeMirror）     │
+│  路由：hash；无构建；静态资源由后端托管         │
+└──────────────────┬──────────────────────────┘
+                   │ HTTP (JSON API + 静态资源)
+                   ▼
+┌─────────────────────────────────────────────┐
+│            cpp-httplib Server                │
+│  ┌────────┬────────┬─────────┬────────────┐ │
+│  │ Auth   │ Problem│ Submit/ │ Static     │ │
+│  │ JWT    │ CRUD   │ History │ Files      │ │
+│  │ 鉴权   │ 管理    │ Ranking │ 托管       │ │
+│  └───┬────┴────────┴────┬────┴────────────┘ │
+│      │                  │                    │
+│      │            JudgeManager (提交入口)     │
+│      │             有界线程池 min(Ncpu,8)     │
+│      │                  │                    │
+└──────┼──────────────────┼────────────────────┘
+       │                  ▼
+       │          ┌─────────────────────────────┐
+       │          │     JudgeWorker (每提交1个)  │
+       │          │  fork() 子进程 + watchdog    │
+       │          │  超时 SIGKILL + waitpid 回收 │
+       │          ▼                             │
+       │   JudgeRuntime — 进程级沙箱             │
+       │    编译 g++/gcc (O2 + ASan/UBSan)      │
+       │    运行 setrlimit + seccomp(禁网/文件) │
+       │    tmpfs 随机目录 · 输出≤64KB           │
+       │    加载隐藏用例 → 逐点比对 → 汇总        │
+       └──────────────┬─────────────────────────┘
+                      ▼
+              ┌───────────────────┐
+              │   SQLite oj.db    │
+              │  WAL 模式         │
+              │  users/problems/  │
+              │  testcases/       │
+              │  submissions/     │
+              │  user_problem_status
+              └─────────┬─────────┘
+                        │ cron .dump
+                        ▼
+                 backup/oj-YYYYMMDD.sql
+```
+
+### 3.2 数据模型（SQLite）
+```
+users(id PK, account TEXT UNIQUE /*10位数字*/,
+      nickname TEXT UNIQUE, password_hash TEXT,
+      role TEXT /*'admin'|'user'*/, reset_pwd_flag INT,
+      created_at)
+problems(id PK, title, description, difficulty TEXT,
+         tags TEXT, time_limit_ms INT, memory_limit_kb INT,
+         visible INT, created_at, updated_at)
+testcases(id PK, problem_id FK, ord INT, input TEXT, output TEXT)
+submissions(id PK, user_id FK, problem_id FK, language TEXT,
+            source_code TEXT, status TEXT /*AC|WA|CE|TLE|RE|MLE|SYSERR*/,
+            per_case TEXT /*JSON 逐点结果*/, compile_msg TEXT,
+            runtime_ms INT, memory_kb INT, created_at)
+user_problem_status(id PK, user_id FK, problem_id FK,
+                    status TEXT /*'accepted'|'none'*/,
+                    first_ac_at DATETIME, submit_count INT,
+                    UNIQUE(user_id, problem_id))
+```
+
+### 3.3 API 边界
+| 方法·路径 | 权限 | 说明 |
+|---|---|---|
+| `POST /api/register` | 公开 | 分配 10 位账号 + 昵称 + 密码 |
+| `POST /api/login` | 公开 | 返回 JWT |
+| `GET /api/me` | 登录 | 个人信息 |
+| `POST /api/me/password` | 登录 | 改密（admin 首登强制调用） |
+| `GET /api/problems` | 公开 | 列表，登录时带本人状态，支持难度/标签/搜索筛选 |
+| `GET /api/problems/{id}` | 公开 | 详情（仅含样例） |
+| `POST /api/problems/{id}/submit` | 登录 | 提交{language, code}，同步返回判题结果 |
+| `GET /api/submissions?mine` | 登录 | 本人提交历史 |
+| `GET /api/submissions/{id}` | 本人/管理员 | 提交详情（含源码与逐点结果） |
+| `GET /api/status` | 登录 | 本人题目状态标记 |
+| `GET /api/leaderboard` | 公开 | 排行榜 |
+| `POST /api/admin/problems` | 管理员 | 建题 |
+| `PUT/DELETE /api/admin/problems/{id}` | 管理员 | 改/删题 |
+| `POST /api/admin/problems/{id}/testcases` | 管理员 | 增用例 |
+| `PUT/DELETE /api/admin/problems/{id}/testcases/{tid}` | 管理员 | 改/删用例 |
+| `POST /api/admin/submissions/{id}/rejudge` | 管理员 | 重判并联动刷新状态/排行 |
+| `GET/PUT /api/admin/users` | 管理员 | 用户列表 / 重置密码·改角色 |
+
+---
+
+## 4. TODO 清单
+
+### M0 工程骨架
+- [ ] `git init`，约定目录结构（`src/`、`web/`、`scripts/`、`data/`、`tests/`）
+- [ ] CMake 构建 cpp-httplib 工程，`Ctrl+C` 优雅停止
+- [ ] SQLite 建表脚本 + WAL 开启 + 数据库初始化（含预置 admin 账号）
+
+### M1 最小端到端链路
+- [ ] 注册/登录/改密 + JWT 鉴权中间件
+- [ ] 题目建表种子数据（2~3 道含隐藏用例）
+- [ ] 提交接口 → 单线程判题器跑通：编译 → 运行 → 比对 → 返回 AC/WA
+- [ ] 简单前端：登录页 + 题目列表 + 做题页（textarea 先顶替 CodeMirror）+ 结果展示
+- [ ] 提交记录落库
+
+### M2 题目与用例管理
+- [ ] admin 题目 CRUD API + 用例录入/编辑/删除
+- [ ] 后台管理前端页面（题目/用例/用户/可见性）
+- [ ] 题目搜索 + 难度/标签筛选
+
+### M3 判题核心完整化（安全加固）
+- [ ] 提交 → worker 线程池 + 同步返回
+- [ ] fork 子进程 + watchdog 超时 SIGKILL + waitpid 回收
+- [ ] setrlimit（CPU/内存/输出 64KB）+ seccomp 禁网络/文件/读 proc
+- [ ] tmpfs 一次性运行目录
+- [ ] ASan/UBSan 编译（C++17 / C11 两套模板）
+- [ ] 全状态机：CE/TLE/RE/MLE/SYSERR + 全局 60s 兜底
+- [ ] 逐测试点结果 JSON + 全量日志
+- [ ] `Rejudge` 接口 + 状态/排行榜联动刷新
+
+### M4 前端完整页面
+- [ ] CodeMirror 接入（CDN，C/C++ 高亮，Ctrl+Enter 提交，分屏结果）
+- [ ] 题目详情页（题面/难度/标签/时限内存、样例展示、本人 AC 状态、去做题入口、本人该题提交历史）
+- [ ] 提交历史 + 提交详情页（源码回显、逐点结果）
+- [ ] 排行榜页 + 题目列表 AC 状态标记
+- [ ] hash 路由整合全部页面；API 调用统一封装（带 token、错误处理）
+
+### M5 安全与异常补全
+- [ ] 登录限速、密码策略、唯一性错误处理
+- [ ] admin 首登强制改密落地
+- [ ] 各种异常路径：删题时关联数据、非法参数、并发提交、判题机 SYSERR 恢复
+
+### M6 测试与交付
+- [ ] 判定器单元测试（比对逻辑、状态机边界，5~10 用例）
+- [ ] 一键回归脚本 `scripts/regression.sh`：启动 → curl 提交已知 AC/WA 样例 → 断言状态
+- [ ] cron 备份脚本 `scripts/backup.sh`
+- [ ] README（启动、默认账号、备份恢复说明）
+
+---
+
+## 5. 验收标准（Acceptance Criteria）
+
+### A. 端到端业务流程（手动验收）
+1. 首次访问可注册：返回 10 位数字账号；同一账号不能被重复分配；重复昵称被拒。
+2. admin 首登强制改密后才能进入后台。
+3. 管理员创建题目（含多组隐藏用例、时限/内存、难度、标签）→ 学生列表可见、可搜索筛选。
+4. 学生提交 AC 答案 → 列表题目标记为已 AC，排行榜见 AC 数 +1。
+5. 断网/重启服务后，题目、提交记录、源码、做题状态、排行榜全部完好（从 SQLite 恢复）。
+
+### B. 判题正确性（单元测试 + 回归脚本）
+6. 已知 AC 样例 → `AC`；已知 WA 样例 → `WA`；两套语言（g++/gcc）各验证一次。
+7. 输出末尾多余空行/行尾空格 → 仍算 `AC`。
+8. 死循环代码 → `TLE`，且判题机主体不受影响（恢复正常提交）。
+9. 越界/野指针代码（ASan 生效）→ `RE`（采集到错误信息）。
+10. 超内存代码 → `MLE`；超大输出 → 截断/`RE`，不撑爆磁盘。
+11. 编译错误代码 → 返回 `CE` 与编译器信息。
+12. 判题线程池满载时并发提交仍全部在合理时间内返回，无假死。
+13. 伪造/篡改 token 的请求被拒绝（401）；学生无法访问他人提交详情。
+
+### C. 工程与交付
+14. `scripts/regression.sh` 一键运行通过（绿色输出）。
+15. 判题单元测试 `tests/` 全部通过。
+16. `scripts/backup.sh` 生成备份文件，且能从备份恢复数据库。
+17. `git` 仓库历史清晰、`README` 描述启动步骤与默认管理员账号。
+
+### D. 非功能抽查
+18. 恶意代码（尝试 `fork` 轰炸 / 网络连接 / 读 `/etc/passwd` / 写文件）被沙箱阻止，只影响自身子进程，返回 `RE`/`SYSERR`，系统其余功能正常。
+19. 单次典型提交端到端耗时 < 数秒（教学规模体感可接受）。
