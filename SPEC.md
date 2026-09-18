@@ -214,6 +214,50 @@ user_problem_status(id PK, user_id FK, problem_id FK,
 | `POST /api/admin/submissions/{id}/rejudge` | 管理员 | 重判并联动刷新状态/排行 |
 | `GET/PUT /api/admin/users` | 管理员 | 用户列表 / 重置密码·改角色 |
 
+### 3.4 项目目录结构
+
+```
+Vibe-Coding/
+├── SPEC.md                # 需求规格本文件；架构/接口/数据模型的唯一依据
+├── dependence.md          # 依赖清单与安装命令（apt + jwt-cpp 源码 + tmpfs 挂载）
+│
+├── src/                   # C++ 后端源码根
+│   ├── main.cpp           # 程序入口：解析配置、初始化 db/http/judge、Ctrl+C 优雅退出
+│   ├── http/              # HTTP 层：cpp-httplib 路由注册、JWT 鉴权/权限中间件、JSON 响应、静态资源托管
+│   ├── auth/              # 认证：argon2id 密码哈希、JWT 签发/校验、登录限速、admin 首登强制改密
+│   ├── db/                # 数据层：SQLite 打开（WAL）、建表脚本、users/problems/testcases/
+│   │                      #   submissions/user_problem_status 的查询封装
+│   └── judge/             # 判题核心：
+│                          #   - IExecutor 接口（沙箱策略可替换，可单测）
+│                          #   - JudgeManager：有界线程池 min(NCPU,8)、提交入口、Rejudge
+│                          #   - JudgeWorker：fork 子进程 + watchdog 超时 SIGKILL + waitpid 回收
+│                          #   - JudgeRuntime：编译(g++/gcc + ASan/UBSan)、setrlimit、seccomp
+│                          #     禁网/文件/读 proc、tmpfs 一次性目录、输出≤64KB、逐测试点比对汇总
+│
+├── web/                   # 前端源码根（无构建，静态托管于后端）
+│   ├── index.html         # SPA 入口：hash 路由各页面容器（登录/注册/题目列表/题目页/
+│   │                      #   提交历史/排行/后台）
+│   ├── css/               # 全局样式：页面布局（题目页左右分屏）、导航、表格、状态标记、结果面板
+│   ├── js/                # 前端逻辑：
+│   │                      #   api.js    —— fetch 统一封装（带 JWT、错误处理、401 跳登录）
+│   │                      #   router.js —— hash 路由分发 + 受保护路由重定向
+│   │                      #   pages/    —— 各页面视图（题目列表/题目页/提交详情/排行/后台管理等）
+│   │                      #   judge.js  —— 编辑器+提交逻辑（CodeMirror 初始化、语言选择、
+│   │                      #     Ctrl+Enter 提交、逐测试点结果渲染）
+│   └── assets/            # 静态素材：logo 图标、favicon 等
+│
+├── scripts/               # 运维与回归脚本
+│   ├── regression.sh      # 一键回归：启动服务 → curl 提交已知 AC/WA 样例 → 断言状态
+│   └── backup.sh          # cron 调用：sqlite3 .dump 生成 backup/oj-YYYYMMDD.sql
+│
+├── data/                  # 运行数据（含 .gitkeep 占位）
+│   └── oj.db              # SQLite 数据库（WAL 模式，重启不丢数据）
+│                          # tmpfs 判题运行目录按 dependence.md 挂在 /opt/oj-tmpfs
+│
+└── tests/                 # 测试
+    └── unit/              # 判题核心单元测试（比对逻辑 AC/行尾空白、状态机边界 CE/TLE/MLE/RE 等）
+```
+
 ---
 
 ## 4. TODO 清单
