@@ -263,7 +263,7 @@ Vibe-Coding/
 ## 4. TODO 清单
 
 ### M0 工程骨架
-- [ ] `git init`，约定目录结构（`src/`、`web/`、`scripts/`、`data/`、`tests/`）
+- [x] `git init`，约定目录结构（`src/`、`web/`、`scripts/`、`data/`、`tests/`）
 - [ ] CMake 构建 cpp-httplib 工程，`Ctrl+C` 优雅停止
 - [ ] SQLite 建表脚本 + WAL 开启 + 数据库初始化（含预置 admin 账号）
 
