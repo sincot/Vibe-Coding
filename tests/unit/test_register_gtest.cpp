@@ -377,7 +377,10 @@ TEST_F(DbTest, DataSurvivesReopenAndAccountNotReused) {
   EXPECT_TRUE(found);
   EXPECT_EQ(rec.nickname, "persist");
 
-  // 已分配账号不复用：再次生成同一账号会碰撞并换号。
+  // 现存账号不复用：重启后已分配账号仍在库中，再次随机到同一账号会触发唯一性
+  // 冲突并换号。此处仅验证「现存账号唯一」这一层，不等于完整证明「永久不复用」——
+  // 该保证在当前无用户删除接口的前提下成立；若未来引入物理删除，需另行用墓碑表/
+  // 软删除机制验证被删除账号不会重新分配（见 SPEC M1.1 实施说明）。
   FakeAccountGenerator gen({"2000000000", "2000000001"});
   RegisterService svc(*db_, gen);
   auto outcome = svc.register_user("persist2", "Pw2");

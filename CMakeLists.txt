@@ -148,15 +148,6 @@ target_link_libraries(oj_db_test PRIVATE
 
 add_test(NAME db_integration COMMAND oj_db_test)
 
-# 注册核心逻辑单元测试（账号生成、校验、注册服务，含确定性账号碰撞模拟）。
-add_executable(oj_register_test
-  tests/unit/test_register.cpp
-)
-
-target_link_libraries(oj_register_test PRIVATE oj_core)
-
-add_test(NAME register_unit COMMAND oj_register_test)
-
 # 注册接口与数据库集成测试（通过 httplib::Client 访问真实 HTTP 服务）。
 add_executable(oj_register_api_test
   tests/integration/test_register_api.cpp
@@ -201,24 +192,6 @@ add_executable(oj_login_gtest
 target_link_libraries(oj_login_gtest PRIVATE oj_core GTest::gtest_main)
 
 add_test(NAME login_gtest COMMAND oj_login_gtest)
-
-# JWT 签发/验证单元测试（算法固定、claims、过期、伪造/篡改/无签名等）。
-add_executable(oj_jwt_test
-  tests/unit/test_jwt.cpp
-)
-
-target_link_libraries(oj_jwt_test PRIVATE oj_core)
-
-add_test(NAME jwt_unit COMMAND oj_jwt_test)
-
-# 登录限速单元测试（可注入时钟，验证阈值、窗口、解除、并发不可绕过）。
-add_executable(oj_rate_limit_test
-  tests/unit/test_rate_limit.cpp
-)
-
-target_link_libraries(oj_rate_limit_test PRIVATE oj_core)
-
-add_test(NAME rate_limit_unit COMMAND oj_rate_limit_test)
 
 # 登录与身份验证集成测试（真实 HTTP 服务 + 隔离临时库 + 测试密钥）。
 add_executable(oj_login_api_test

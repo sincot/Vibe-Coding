@@ -50,10 +50,10 @@ cmake --build build --parallel 1
 ctest --test-dir build -R db_integration --output-on-failure
 ```
 
-注册单元测试与接口集成测试（同样使用隔离临时库与随机端口，不触碰正式数据库）：
+注册单元测试（gtest）与接口集成测试（同样使用隔离临时库与随机端口，不触碰正式数据库）：
 
 ```bash
-ctest --test-dir build -R register_unit --output-on-failure
+ctest --test-dir build -R register_gtest --output-on-failure
 ctest --test-dir build -R register_api --output-on-failure
 # 或一次性运行全部测试
 ctest --test-dir build --output-on-failure
