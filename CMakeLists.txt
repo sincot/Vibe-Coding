@@ -71,6 +71,7 @@ endif()
 # 核心静态库：数据库、认证与 HTTP 层（除程序入口外），供服务与测试复用。
 # ---------------------------------------------------------------------------
 add_library(oj_core STATIC
+  src/config.cpp
   src/http/server.cpp
   src/db/database.cpp
   src/db/schema.cpp
@@ -121,6 +122,11 @@ target_link_libraries(oj_server PRIVATE oj_core)
 # ---------------------------------------------------------------------------
 enable_testing()
 
+# ---------------------------------------------------------------------------
+# gtest（Ubuntu 22.04 的 libgtest-dev，提供头文件与静态库 GTest::gtest_main）
+# ---------------------------------------------------------------------------
+find_package(GTest REQUIRED)
+
 add_executable(oj_db_test
   tests/integration/test_db.cpp
   src/db/database.cpp
@@ -159,6 +165,42 @@ add_executable(oj_register_api_test
 target_link_libraries(oj_register_api_test PRIVATE oj_core)
 
 add_test(NAME register_api COMMAND oj_register_api_test)
+
+# 注册功能 gtest 单元测试（账号生成、昵称/密码校验、用户数据访问、注册服务）。
+add_executable(oj_register_gtest
+  tests/unit/test_register_gtest.cpp
+)
+
+target_link_libraries(oj_register_gtest PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME register_gtest COMMAND oj_register_gtest)
+
+# M1.2 JWT 签发/验证 gtest 单元测试（算法固定、claims、过期、伪造/篡改/无签名等）。
+add_executable(oj_jwt_gtest
+  tests/unit/test_jwt_gtest.cpp
+)
+
+target_link_libraries(oj_jwt_gtest PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME jwt_gtest COMMAND oj_jwt_gtest)
+
+# M1.2 登录限速 gtest 单元测试（可注入时钟，验证阈值、窗口、解除、并发不可绕过）。
+add_executable(oj_rate_limit_gtest
+  tests/unit/test_rate_limit_gtest.cpp
+)
+
+target_link_libraries(oj_rate_limit_gtest PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME rate_limit_gtest COMMAND oj_rate_limit_gtest)
+
+# M1.2 登录服务与鉴权上下文 gtest 单元测试（登录结果、Bearer 解析、鉴权回查）。
+add_executable(oj_login_gtest
+  tests/unit/test_login_gtest.cpp
+)
+
+target_link_libraries(oj_login_gtest PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME login_gtest COMMAND oj_login_gtest)
 
 # JWT 签发/验证单元测试（算法固定、claims、过期、伪造/篡改/无签名等）。
 add_executable(oj_jwt_test
@@ -204,3 +246,35 @@ add_executable(oj_password_api_test
 target_link_libraries(oj_password_api_test PRIVATE oj_core)
 
 add_test(NAME password_api COMMAND oj_password_api_test)
+
+# 配置管理单元测试（命令行参数解析、端口校验、环境变量读取、JWT 配置校验）。
+add_executable(oj_config_test
+  tests/unit/test_config.cpp
+)
+
+target_link_libraries(oj_config_test PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME config_unit COMMAND oj_config_test)
+
+# 项目结构单元测试（M0.1）：验证约定目录、关键文件与忽略规则（纯文件系统检查）。
+add_executable(oj_project_structure_test
+  tests/unit/test_project_structure.cpp
+)
+
+target_compile_definitions(oj_project_structure_test PRIVATE
+  OJ_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
+target_link_libraries(oj_project_structure_test PRIVATE GTest::gtest_main)
+
+add_test(NAME project_structure_unit COMMAND oj_project_structure_test)
+
+# HTTP 服务单元测试（M0.2）：健康检查、启动/停止生命周期、端口占用检测与
+# 同端口重启（隔离临时库 + 环回随机端口，不触碰正式数据库）。
+add_executable(oj_http_server_test
+  tests/unit/test_http_server.cpp
+)
+
+target_link_libraries(oj_http_server_test PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME http_server_unit COMMAND oj_http_server_test)

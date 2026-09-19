@@ -21,7 +21,7 @@ Ubuntu 22.04 LTS，安装依赖：
 ```bash
 sudo apt update
 sudo apt install -y build-essential cmake libcpp-httplib-dev nlohmann-json3-dev \
-  libsqlite3-dev libargon2-dev libssl-dev
+  libsqlite3-dev libargon2-dev libssl-dev libgtest-dev
 ```
 
 > 完整依赖清单（seccomp、jwt-cpp、tmpfs 挂载等后续阶段使用）见 `dependence.md`。
@@ -32,10 +32,15 @@ sudo apt install -y build-essential cmake libcpp-httplib-dev nlohmann-json3-dev 
 
 ```bash
 cmake -S . -B build
-cmake --build build -j
+cmake --build build --parallel 1
 ```
 
 生成可执行程序 `build/oj_server`。
+
+> 开发验证构建必须固定并发为 1：本项目目标机内存较小（约 3.3 GiB、无 Swap，与
+> VS Code Server / OpenCode 共用资源）。裸 `-j`（无数量的 -j 会使 GNU Make 无限
+> 并发）或 `-j$(nproc)` 会耗尽内存、引发严重 I/O 等待甚至 SSH 断连，故统一使用
+> `cmake --build build --parallel 1`（或 `-j 1`），不要改回无数量的 `-j`。
 
 ## 测试
 
@@ -68,6 +73,16 @@ ctest --test-dir build -R password_api --output-on-failure
 覆盖改密校验、首次改密检查、管理员权限检查组合、改密服务原子更新与并发；以及普通
 用户改密、错误/非法输入拒绝、越权字段、admin 首改限制与绕过、角色变更后权限实时
 生效、并发改密、内部故障不泄露、改密后旧 token 行为等。
+
+配置管理单元测试（基于 gtest，无外部依赖，不触碰数据库与网络）：
+
+```bash
+ctest --test-dir build -R config_unit --output-on-failure
+```
+
+覆盖命令行参数解析（`--host`/`--port`/`--db`/`--help`）、端口校验、默认值与组合参数、
+非法/未知参数、初始管理员密码环境变量读取，以及 JWT 配置（`OJ_JWT_SECRET` /
+`OJ_JWT_EXPIRES_SECONDS`）的读取与边界校验。
 
 ## 运行
 

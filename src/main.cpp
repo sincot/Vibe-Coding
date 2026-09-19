@@ -1,35 +1,17 @@
 #include <chrono>
 #include <csignal>
-#include <cstdlib>
 #include <iostream>
-#include <optional>
 #include <string>
 #include <thread>
 
 #include "auth/jwt.h"
+#include "config.h"
 #include "db/database.h"
 #include "db/schema.h"
 #include "http/server.h"
 #include "log.h"
 
 namespace {
-
-// 基础配置：监听地址、端口与数据库路径，均提供默认值。
-struct Config {
-  std::string host = "0.0.0.0";
-  int port = 8080;
-  std::string db_path = "data/oj.db";
-};
-
-// 初始管理员密码通过环境变量 OJ_ADMIN_PASSWORD 提供，不写入源码、版本控制
-// 或日志。仅当数据库中还没有 admin 时才读取并使用；已有 admin 时无需设置。
-std::optional<std::string> read_admin_password() {
-  const char *value = std::getenv("OJ_ADMIN_PASSWORD");
-  if (value == nullptr) {
-    return std::nullopt;
-  }
-  return std::string(value);
-}
 
 // 仅用于在信号处理函数中写入的标志位：volatile sig_atomic_t 保证异步信号安全，
 // 信号处理函数不调用任何日志或复杂清理逻辑。
@@ -55,90 +37,14 @@ void print_usage(std::ostream &os, const char *prog) {
       << "  OJ_JWT_EXPIRES_SECONDS  JWT 有效期（秒），默认 3600。\n";
 }
 
-bool parse_port(const std::string &text, int &out) {
-  if (text.empty()) {
-    return false;
-  }
-  for (char c : text) {
-    if (c < '0' || c > '9') {
-      return false;
-    }
-  }
-  long value = 0;
-  try {
-    value = std::stol(text);
-  } catch (...) {
-    return false;
-  }
-  if (value < 1 || value > 65535) {
-    return false;
-  }
-  out = static_cast<int>(value);
-  return true;
-}
-
-// 解析命令行参数。want_help=true 表示打印帮助后正常退出（返回码 0）。
-// 返回 false 表示参数非法，调用方以非零返回码退出。
-bool parse_args(int argc, char **argv, Config &cfg, bool &want_help) {
-  for (int i = 1; i < argc; ++i) {
-    std::string arg = argv[i];
-
-    if (arg == "--help" || arg == "-h") {
-      want_help = true;
-      return true;
-    }
-
-    if (arg == "--host") {
-      if (i + 1 >= argc) {
-        std::cerr << "错误: --host 需要一个参数\n";
-        return false;
-      }
-      cfg.host = argv[++i];
-      if (cfg.host.empty()) {
-        std::cerr << "错误: --host 参数不能为空\n";
-        return false;
-      }
-      continue;
-    }
-
-    if (arg == "--port") {
-      if (i + 1 >= argc) {
-        std::cerr << "错误: --port 需要一个参数\n";
-        return false;
-      }
-      if (!parse_port(argv[++i], cfg.port)) {
-        std::cerr << "错误: 非法端口 \"" << argv[i]
-                  << "\"（端口须为 1-65535 之间的整数）\n";
-        return false;
-      }
-      continue;
-    }
-
-    if (arg == "--db") {
-      if (i + 1 >= argc) {
-        std::cerr << "错误: --db 需要一个参数\n";
-        return false;
-      }
-      cfg.db_path = argv[++i];
-      if (cfg.db_path.empty()) {
-        std::cerr << "错误: --db 参数不能为空\n";
-        return false;
-      }
-      continue;
-    }
-
-    std::cerr << "错误: 未知参数 \"" << arg << "\"\n";
-    return false;
-  }
-  return true;
-}
-
 } // namespace
 
 int main(int argc, char **argv) {
-  Config cfg;
+  oj::config::Config cfg;
   bool want_help = false;
-  if (!parse_args(argc, argv, cfg, want_help)) {
+  std::string cfg_error;
+  if (!oj::config::parse_args(argc, argv, cfg, want_help, cfg_error)) {
+    std::cerr << cfg_error << "\n";
     print_usage(std::cerr, argv[0]);
     return 2;
   }
@@ -163,7 +69,7 @@ int main(int argc, char **argv) {
   }
   oj::log(oj::LogLevel::Info, "数据库已打开: " + cfg.db_path);
 
-  if (!oj::initialize_schema(*db, read_admin_password(), error)) {
+  if (!oj::initialize_schema(*db, oj::config::read_admin_password(), error)) {
     oj::log(oj::LogLevel::Error, "数据库初始化失败: " + error);
     return 1;
   }

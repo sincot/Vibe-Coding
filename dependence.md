@@ -30,6 +30,7 @@
 | `libssl-dev` | 3.0.2 | OpenSSL 3.0，JWT HS256 签名所需 libcrypto |
 | `nlohmann-json3-dev` | 3.10.5 | JSON 序列化 / 解析（API 与判题逐点结果） |
 | `libcpp-httplib-dev` | 0.10.3 | 后端 HTTP 服务（静态资源托管 + JSON API） |
+| `libgtest-dev` | 1.11.0 | GoogleTest 单元测试框架（`tests/` 单元测试使用，仅测试构建需要） |
 | `cron` | 3.0pl1 | 定期 `.dump` 备份（PERS-04） |
 | `curl` | 7.81.0 | 回归脚本 `scripts/regression.sh` 发起 HTTP 请求 |
 
@@ -76,7 +77,17 @@ sudo apt install -y libargon2-dev libssl-dev
 sudo apt install -y nlohmann-json3-dev libcpp-httplib-dev
 ```
 
-### 3.6 jwt-cpp（header-only，源码安装）
+### 3.6 单元测试框架（gtest）
+
+```bash
+sudo apt install -y libgtest-dev
+```
+
+- 提供 `GTest::gtest_main` / `GTest::gtest`（头文件与静态库），供 `tests/unit` 的
+  gtest 单元测试（如配置管理 `test_config.cpp`）链接，不参与服务端运行时依赖。
+
+
+### 3.7 jwt-cpp（header-only，源码安装）
 
 ```bash
 cd /tmp
@@ -91,14 +102,14 @@ rm -rf jwt-cpp
   与项目 JSON 依赖 `nlohmann-json3-dev` 保持一致，无需额外引入 picojson。
 - 运行时需通过环境变量 `OJ_JWT_SECRET` 提供 HS256 签名密钥（详见 README 与本节 6.5）。
 
-### 3.7 运维辅助
+### 3.8 运维辅助
 
 ```bash
 sudo apt install -y cron curl
 sudo systemctl enable --now cron
 ```
 
-### 3.8 判题 tmpfs 运行目录（一次性挂载）
+### 3.9 判题 tmpfs 运行目录（一次性挂载）
 
 ```bash
 sudo mkdir -p /opt/oj-tmpfs
@@ -125,6 +136,7 @@ g++ --version && gcc --version
 cmake --version
 sqlite3 --version
 dpkg -l libseccomp-dev libargon2-dev libssl-dev nlohmann-json3-dev libcpp-httplib-dev | tail -n +6
+test -f /usr/include/gtest/gtest.h && echo "gtest OK"
 test -f /usr/local/include/jwt-cpp/jwt.h && echo "jwt-cpp OK"
 mount | grep oj-tmpfs
 ```
