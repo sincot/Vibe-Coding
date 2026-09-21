@@ -294,6 +294,66 @@ void test_persistence() {
   }
 }
 
+void test_schema_migration_old_db() {
+  std::cout << "旧库迁移：补充 is_sample / seed_key 列且保留已有数据\n";
+  TempDir dir("migrate");
+  std::string err;
+  auto db = oj::Database::open(dir.db_path(), err);
+  check(db != nullptr, "打开数据库成功");
+
+  // 模拟本阶段之前创建的旧库：problems/testcases 无 is_sample、seed_key 列。
+  check(db->exec("CREATE TABLE problems ("
+                 "id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, "
+                 "description TEXT NOT NULL DEFAULT '', difficulty TEXT NOT NULL "
+                 "DEFAULT 'easy', tags TEXT NOT NULL DEFAULT '', time_limit_ms "
+                 "INTEGER NOT NULL DEFAULT 2000, memory_limit_kb INTEGER NOT NULL "
+                 "DEFAULT 65536, visible INTEGER NOT NULL DEFAULT 1, created_at "
+                 "TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT "
+                 "NULL DEFAULT (datetime('now')));",
+                 err),
+        "创建旧版 problems 表");
+  check(db->exec("CREATE TABLE testcases ("
+                 "id INTEGER PRIMARY KEY AUTOINCREMENT, problem_id INTEGER NOT "
+                 "NULL REFERENCES problems(id), ord INTEGER NOT NULL DEFAULT 0, "
+                 "input TEXT NOT NULL DEFAULT '', output TEXT NOT NULL DEFAULT "
+                 "'');",
+                 err),
+        "创建旧版 testcases 表");
+  check(db->exec("INSERT INTO problems (title, description) VALUES "
+                 "('Legacy', '旧题面');",
+                 err),
+        "写入旧数据");
+  check(db->exec("INSERT INTO testcases (problem_id, ord, input, output) "
+                 "VALUES (1, 0, 'old-in', 'old-out');",
+                 err),
+        "写入旧用例");
+
+  check(oj::initialize_schema(*db, std::string("Pw!"), err), "初始化（迁移）成功");
+
+  auto column_exists = [&](const std::string &table,
+                           const std::string &column) -> bool {
+    std::string e;
+    oj::Statement stmt;
+    db->prepare("PRAGMA table_info(" + table + ")", stmt, e);
+    while (stmt.step() == SQLITE_ROW) {
+      if (stmt.column_text(1) == column) {
+        return true;
+      }
+    }
+    return false;
+  };
+  check(column_exists("testcases", "is_sample"), "testcases 已补充 is_sample 列");
+  check(column_exists("problems", "seed_key"), "problems 已补充 seed_key 列");
+
+  check(query_text(*db, "SELECT title FROM problems WHERE title='Legacy'") ==
+            "Legacy",
+        "旧题目数据保留");
+  check(query_text(*db, "SELECT input FROM testcases WHERE ord=0") == "old-in",
+        "旧用例数据保留");
+  check(query_text(*db, "SELECT is_sample FROM testcases WHERE ord=0") == "0",
+        "旧用例 is_sample 默认为 0（隐藏）");
+}
+
 void test_missing_admin_password_fails() {
   std::cout << "无 admin 且缺少初始密码时初始化失败\n";
   TempDir dir("nopw");
@@ -332,6 +392,7 @@ int main() {
   test_admin_password_hash();
   test_reinit_idempotent();
   test_persistence();
+  test_schema_migration_old_db();
   test_missing_admin_password_fails();
   test_unwritable_path_fails();
 

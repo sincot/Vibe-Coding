@@ -76,6 +76,11 @@ bool parse_args(int argc, char **argv, Config &cfg, bool &want_help,
       continue;
     }
 
+    if (arg == "--seed") {
+      cfg.seed = true;
+      continue;
+    }
+
     error = "错误: 未知参数 \"" + arg + "\"";
     return false;
   }

@@ -8,6 +8,7 @@
 #include "config.h"
 #include "db/database.h"
 #include "db/schema.h"
+#include "db/seed.h"
 #include "http/server.h"
 #include "log.h"
 
@@ -23,10 +24,11 @@ extern "C" void handle_signal(int sig) {
 
 void print_usage(std::ostream &os, const char *prog) {
   os << "用法: " << prog
-     << " [--host <地址>] [--port <端口>] [--db <路径>] [--help]\n"
+     << " [--host <地址>] [--port <端口>] [--db <路径>] [--seed] [--help]\n"
      << "  --host  监听地址，默认 0.0.0.0\n"
      << "  --port  监听端口，默认 8080（范围 1-65535）\n"
      << "  --db    SQLite 数据库路径，默认 data/oj.db\n"
+     << "  --seed  导入内置种子题目后退出（幂等，不覆盖已有题目，不启动服务）\n"
      << "  --help  显示本帮助\n"
      << "\n"
       << "环境变量:\n"
@@ -50,6 +52,30 @@ int main(int argc, char **argv) {
   }
   if (want_help) {
     print_usage(std::cout, argv[0]);
+    return 0;
+  }
+
+  // --seed：只导入种子题目后退出。仅创建/迁移表结构，不涉及 admin，也不启动服务；
+  // 因此无需 OJ_JWT_SECRET 与 OJ_ADMIN_PASSWORD。重复执行幂等。
+  if (cfg.seed) {
+    std::string error;
+    auto db = oj::Database::open(cfg.db_path, error);
+    if (!db) {
+      std::cerr << "数据库初始化失败: " << error << "\n";
+      return 1;
+    }
+    if (!oj::ensure_schema(*db, error)) {
+      std::cerr << "数据库结构初始化失败: " << error << "\n";
+      return 1;
+    }
+    int created = 0;
+    if (!oj::import_seed_problems(*db, created, error)) {
+      std::cerr << "种子数据导入失败: " << error << "\n";
+      return 1;
+    }
+    std::cout << "种子数据导入完成：新建题目 " << created
+              << " 道（已存在的题目已跳过）\n";
+    db->close();
     return 0;
   }
 

@@ -181,8 +181,10 @@ users(id PK, account TEXT UNIQUE /*10位数字*/,
       created_at)
 problems(id PK, title, description, difficulty TEXT,
          tags TEXT, time_limit_ms INT, memory_limit_kb INT,
-         visible INT, created_at, updated_at)
-testcases(id PK, problem_id FK, ord INT, input TEXT, output TEXT)
+         visible INT, seed_key TEXT /*内置种子题稳定标识，普通题为 NULL*/,
+         created_at, updated_at)
+testcases(id PK, problem_id FK, ord INT, input TEXT, output TEXT,
+          is_sample INT /*1=公开样例 0=隐藏用例*/)
 submissions(id PK, user_id FK, problem_id FK, language TEXT,
             source_code TEXT, status TEXT /*AC|WA|CE|TLE|RE|MLE|SYSERR*/,
             per_case TEXT /*JSON 逐点结果，WA 点含输入/期望输出/用户输出*/, compile_msg TEXT,
@@ -416,11 +418,38 @@ Vibe-Coding/
 
 #### M1.4 最小题目数据与查询
 
-- [ ] 准备 2～3 道种子题目，包含公开样例及隐藏测试用例。
-- [ ] 实现题目列表和详情所需的数据查询。
-- [ ] 实现 `GET /api/problems` 的基础列表功能。
-- [ ] 实现 `GET /api/problems/{id}`。
-- [ ] 实现题目可见性检查，确保详情不下发隐藏用例。
+- [x] 准备 2～3 道种子题目，包含公开样例及隐藏测试用例。
+- [x] 实现题目列表和详情所需的数据查询。
+- [x] 实现 `GET /api/problems` 的基础列表功能。
+- [x] 实现 `GET /api/problems/{id}`。
+- [x] 实现题目可见性检查，确保详情不下发隐藏用例。
+
+> 实施说明：
+>
+> - **数据模型最小调整**：原 `testcases` 无法区分公开样例与隐藏用例，故新增
+>   `is_sample INTEGER NOT NULL DEFAULT 0`（`1`=公开样例，`0`=隐藏用例），显式区分，
+>   不采用「前 N 个默认公开」等隐含规则；`problems` 新增可空 `seed_key TEXT` 及唯一索引
+>   （`idx_problems_seed_key`，允许多个 NULL），作为种子题的稳定幂等标识。两处均通过
+>   `initialize_schema` 内的 `ALTER TABLE ADD COLUMN` 迁移旧库，不重建、不清空、保留数据。
+> - **种子题**：内置 A+B Problem、整数求和、求最大值三道简单题，标准 ACM 输入输出，
+>   含标题、纯文本题面、输入输出说明、公开样例、隐藏用例、难度、标签、时限与内存限制。
+>   公开样例与隐藏用例内容刻意不同，便于验证不泄露。
+> - **幂等导入**：`./build/oj_server --db <路径> --seed` 显式导入后退出，不在服务启动时
+>   自动执行。以 `seed_key` 判定已存在则整题跳过，不重复创建、不覆盖任何已有修改、
+>   不清空其它数据；每题在单事务内写入题目与用例。仅建/迁移表结构，不涉及 admin，
+>   无需 `OJ_JWT_SECRET` / `OJ_ADMIN_PASSWORD`。
+> - **数据层**：`src/db/problems.{h,cpp}` 封装列表（按 `id` 升序稳定排序）、详情、公开样例
+>   与全部用例读取，全部参数绑定。公开查询结构体不含隐藏用例；含隐藏用例的
+>   `list_testcases` 仅供判题/管理使用，不直接序列化下发。
+> - **接口**：`GET /api/problems` 返回 `{"problems":[{id,title,difficulty,tags,visible}],"total":N}`；
+>   `GET /api/problems/{id}` 返回元数据与 `samples`（仅公开样例），均不含隐藏用例。
+> - **可见性**：游客与普通用户仅可见 `visible=1` 题目；通过 M1.3 管理员检查
+>   （已登录 + 已完成首次改密 + admin 角色）者可看隐藏题。列表与详情规则一致，直接请求
+>   隐藏题 ID 亦返回 `404`；未完成首次改密的管理员按普通用户处理。无效/伪造/过期 token
+>   返回 `401`，不当作管理员。不存在的题目与无权查看的隐藏题目对游客/普通用户统一 `404`；
+>   非法 ID `400`；数据库故障 `500` 通用文案。
+> - 请求/响应示例与可见范围表见 `README.md`；测试见 `tests/integration/test_problems_api.cpp`
+>   与 `tests/unit/test_problems_unit.cpp`。
 
 #### M1.5 最小判题器
 

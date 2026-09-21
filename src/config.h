@@ -11,6 +11,9 @@ struct Config {
   std::string host = "0.0.0.0";
   int port = 8080;
   std::string db_path = "data/oj.db";
+  // --seed：只导入内置种子题目后退出，不启动 HTTP 服务。默认为 false，
+  // 因此正常启动不会无条件重写题目数据。
+  bool seed = false;
 };
 
 // 校验端口字符串是否为 1..65535 之间的整数。成功写入 out 并返回 true；

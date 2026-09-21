@@ -14,6 +14,7 @@
 #include "auth/password_change.h"
 #include "auth/rate_limit.h"
 #include "auth/register.h"
+#include "db/problems.h"
 #include "db/users.h"
 
 namespace oj {
@@ -57,14 +58,25 @@ private:
   void handle_me(const httplib::Request &req, httplib::Response &res);
   void handle_change_password(const httplib::Request &req,
                               httplib::Response &res);
+  void handle_problem_list(const httplib::Request &req,
+                           httplib::Response &res);
+  void handle_problem_detail(const httplib::Request &req,
+                             httplib::Response &res);
   void handle_test_admin_only(const httplib::Request &req,
                               httplib::Response &res);
+
+  // 解析可选的访问者身份：未携带 Authorization 头时视为游客；携带时复用已有
+  // 身份验证。认证失败已写入响应并返回 false；成功时 is_admin 表示是否通过
+  // 管理员检查（已登录 + 已完成首次改密 + admin 角色），用于题目可见性判断。
+  bool resolve_viewer(const httplib::Request &req, httplib::Response &res,
+                      bool &is_admin);
 
   std::string host_;
   int port_;
   Database &db_;
   auth::JwtService jwt_;
   UserStore user_store_;
+  ProblemStore problem_store_;
   auth::RateLimiter rate_limiter_;
   auth::RandomAccountGenerator account_gen_;
   auth::RegisterService register_service_;

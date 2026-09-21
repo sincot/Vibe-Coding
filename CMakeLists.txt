@@ -76,6 +76,8 @@ add_library(oj_core STATIC
   src/db/database.cpp
   src/db/schema.cpp
   src/db/users.cpp
+  src/db/problems.cpp
+  src/db/seed.cpp
   src/auth/password.cpp
   src/auth/account.cpp
   src/auth/validation.cpp
@@ -219,6 +221,24 @@ add_executable(oj_password_api_test
 target_link_libraries(oj_password_api_test PRIVATE oj_core)
 
 add_test(NAME password_api COMMAND oj_password_api_test)
+
+# M1.4 题目数据与查询：纯函数单元测试（标签解析）。
+add_executable(oj_problems_unit
+  tests/unit/test_problems_unit.cpp
+)
+
+target_link_libraries(oj_problems_unit PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME problems_unit COMMAND oj_problems_unit)
+
+# M1.4 题目种子数据、可见性与查询接口集成测试（隔离临时库 + 随机端口真实 HTTP）。
+add_executable(oj_problems_api_test
+  tests/integration/test_problems_api.cpp
+)
+
+target_link_libraries(oj_problems_api_test PRIVATE oj_core)
+
+add_test(NAME problems_api COMMAND oj_problems_api_test)
 
 # 配置管理单元测试（命令行参数解析、端口校验、环境变量读取、JWT 配置校验）。
 add_executable(oj_config_test

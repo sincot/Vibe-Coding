@@ -95,6 +95,7 @@ TEST(ConfigDefaults, DefaultValues) {
   EXPECT_EQ(cfg.host, "0.0.0.0");
   EXPECT_EQ(cfg.port, 8080);
   EXPECT_EQ(cfg.db_path, "data/oj.db");
+  EXPECT_FALSE(cfg.seed) << "默认不导入种子（正常启动不重写题目数据）";
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +204,28 @@ TEST(ParseArgs, DbOption) {
 
   EXPECT_TRUE(parse_args(args.argc(), args.argv(), cfg, want_help, err));
   EXPECT_EQ(cfg.db_path, "/tmp/oj-test.db");
+}
+
+TEST(ParseArgs, SeedFlag) {
+  Config cfg;
+  bool want_help = false;
+  std::string err;
+  Argv args({"--seed"});
+
+  EXPECT_TRUE(parse_args(args.argc(), args.argv(), cfg, want_help, err));
+  EXPECT_TRUE(cfg.seed);
+}
+
+TEST(ParseArgs, SeedWithOtherOptions) {
+  Config cfg;
+  bool want_help = false;
+  std::string err;
+  Argv args({"--seed", "--db", "/tmp/seed.db", "--port", "9000"});
+
+  EXPECT_TRUE(parse_args(args.argc(), args.argv(), cfg, want_help, err));
+  EXPECT_TRUE(cfg.seed);
+  EXPECT_EQ(cfg.db_path, "/tmp/seed.db");
+  EXPECT_EQ(cfg.port, 9000);
 }
 
 TEST(ParseArgs, CombinedOptions) {

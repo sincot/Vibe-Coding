@@ -31,6 +31,9 @@ const char *const kSchemaStatements[] = {
     ))sql",
 
     // 题目
+    //
+    // seed_key：内置种子题的稳定标识（M1.4）。普通题目为 NULL；有值时在唯一索引
+    // 约束下保证同一道种子题只被导入一次，重复导入时整题跳过，不覆盖已修改的题目。
     R"sql(
     CREATE TABLE IF NOT EXISTS problems (
       id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,18 +44,23 @@ const char *const kSchemaStatements[] = {
       time_limit_ms   INTEGER NOT NULL DEFAULT 2000,
       memory_limit_kb INTEGER NOT NULL DEFAULT 65536,
       visible         INTEGER NOT NULL DEFAULT 1,
+      seed_key        TEXT,
       created_at      TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
     ))sql",
 
-    // 测试用例（公开样例与隐藏用例共用，样例/隐藏的区分方式待后续阶段确认）
+    // 测试用例（公开样例与隐藏用例共用一张表，用 is_sample 显式区分）
+    //
+    // is_sample=1 表示公开样例，随题面下发；is_sample=0 表示隐藏用例，仅判题读取。
+    // 不使用「前 N 个默认公开」等隐含规则，避免顺序变动导致样例/隐藏错位。
     R"sql(
     CREATE TABLE IF NOT EXISTS testcases (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
       problem_id  INTEGER NOT NULL REFERENCES problems(id),
       ord         INTEGER NOT NULL DEFAULT 0,
       input       TEXT NOT NULL DEFAULT '',
-      output      TEXT NOT NULL DEFAULT ''
+      output      TEXT NOT NULL DEFAULT '',
+      is_sample   INTEGER NOT NULL DEFAULT 0
     ))sql",
 
     // 提交记录
@@ -88,6 +96,8 @@ const char *const kSchemaStatements[] = {
 const char *const kIndexStatements[] = {
     // 题目列表按可见性筛选
     "CREATE INDEX IF NOT EXISTS idx_problems_visible ON problems(visible);",
+    // 种子题幂等标识：唯一索引允许多个 NULL，故普通题目（seed_key 为 NULL）不受影响
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_problems_seed_key ON problems(seed_key);",
     // 用例按题目归属读取（leftmost 为 problem_id，配合 ord 排序）
     "CREATE INDEX IF NOT EXISTS idx_testcases_problem_ord ON testcases(problem_id, ord);",
     // 提交历史：按用户 / 按题目查询
@@ -113,6 +123,72 @@ bool run_in_transaction(Database &db,
     std::string ignored;
     db.rollback(ignored);
     return false;
+  }
+  return true;
+}
+
+// 判断表中是否已存在指定列（table/column 仅由本文件以字面量传入）。
+bool column_exists(Database &db, const char *table, const char *column,
+                   bool &exists, std::string &error) {
+  std::string sql = std::string("PRAGMA table_info(") + table + ")";
+  Statement stmt;
+  if (!db.prepare(sql, stmt, error)) {
+    return false;
+  }
+  exists = false;
+  while (true) {
+    int rc = stmt.step();
+    if (rc == SQLITE_ROW) {
+      if (stmt.column_text(1) == column) {
+        exists = true;
+        return true;
+      }
+      continue;
+    }
+    if (rc == SQLITE_DONE) {
+      return true;
+    }
+    error = stmt.errmsg();
+    return false;
+  }
+}
+
+// 若表中缺少指定列则用 ALTER TABLE 补充，用于兼容本阶段之前创建的旧库。
+// table/column/definition 仅由本文件以字面量传入，不存在注入风险。
+bool ensure_column(Database &db, const char *table, const char *column,
+                   const char *definition, std::string &error) {
+  bool exists = false;
+  if (!column_exists(db, table, column, exists, error)) {
+    return false;
+  }
+  if (exists) {
+    return true;
+  }
+  std::string sql = std::string("ALTER TABLE ") + table + " ADD COLUMN " +
+                    column + " " + definition;
+  return db.exec(sql, error);
+}
+
+// 执行建表、列迁移与建索引（不含事务控制，由调用方包裹在事务中）。
+// 重复执行幂等：表/索引使用 IF NOT EXISTS，新增列先检测存在性再补充。
+bool apply_schema(Database &db, std::string &error) {
+  for (const char *sql : kSchemaStatements) {
+    if (!db.exec(sql, error)) {
+      return false;
+    }
+  }
+  // 迁移旧库：补充后续阶段新增的列（新库在建表时已包含，此处为空操作）。
+  if (!ensure_column(db, "testcases", "is_sample", "INTEGER NOT NULL DEFAULT 0",
+                     error)) {
+    return false;
+  }
+  if (!ensure_column(db, "problems", "seed_key", "TEXT", error)) {
+    return false;
+  }
+  for (const char *sql : kIndexStatements) {
+    if (!db.exec(sql, error)) {
+      return false;
+    }
   }
   return true;
 }
@@ -166,21 +242,20 @@ bool insert_admin_if_absent(Database &db, const std::string &hash,
 
 } // namespace
 
+bool ensure_schema(Database &db, std::string &error) {
+  return run_in_transaction(
+      db, [&](std::string &err) -> bool { return apply_schema(db, err); },
+      error);
+}
+
 bool initialize_schema(Database &db,
                        const std::optional<std::string> &admin_password,
                        std::string &error) {
   return run_in_transaction(
       db,
       [&](std::string &err) -> bool {
-        for (const char *sql : kSchemaStatements) {
-          if (!db.exec(sql, err)) {
-            return false;
-          }
-        }
-        for (const char *sql : kIndexStatements) {
-          if (!db.exec(sql, err)) {
-            return false;
-          }
+        if (!apply_schema(db, err)) {
+          return false;
         }
 
         bool exists = false;

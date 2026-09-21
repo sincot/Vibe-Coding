@@ -160,6 +160,63 @@ json public_user_json(const UserRecord &user) {
   return j;
 }
 
+// 解析题目 ID：仅接受正的十进制整数（可含前导零），否则视为非法客户端输入。
+bool parse_problem_id(const std::string &text, std::int64_t &out) {
+  if (text.empty() || text.size() > 19) {
+    return false;
+  }
+  for (char c : text) {
+    if (c < '0' || c > '9') {
+      return false;
+    }
+  }
+  try {
+    std::size_t pos = 0;
+    long long value = std::stoll(text, &pos);
+    if (pos != text.size() || value <= 0) {
+      return false;
+    }
+    out = static_cast<std::int64_t>(value);
+    return true;
+  } catch (const std::exception &) {
+    return false;
+  }
+}
+
+// 列表条目 JSON：只含列表展示所需字段，不含题面与任何测试用例。
+json problem_summary_json(const ProblemSummary &problem) {
+  json j;
+  j["id"] = problem.id;
+  j["title"] = problem.title;
+  j["difficulty"] = problem.difficulty;
+  j["tags"] = problem.tags;
+  j["visible"] = problem.visible;
+  return j;
+}
+
+// 详情 JSON：只含元数据与公开样例，绝不包含隐藏用例。
+json problem_detail_json(const ProblemRecord &problem,
+                         const std::vector<SampleCase> &samples) {
+  json j;
+  j["id"] = problem.id;
+  j["title"] = problem.title;
+  j["description"] = problem.description;
+  j["difficulty"] = problem.difficulty;
+  j["tags"] = problem.tags;
+  j["time_limit_ms"] = problem.time_limit_ms;
+  j["memory_limit_kb"] = problem.memory_limit_kb;
+  j["visible"] = problem.visible;
+  json sample_array = json::array();
+  for (const SampleCase &sample : samples) {
+    json item;
+    item["input"] = sample.input;
+    item["output"] = sample.output;
+    sample_array.push_back(std::move(item));
+  }
+  j["samples"] = std::move(sample_array);
+  return j;
+}
+
 } // namespace
 
 HttpServer::HttpServer(std::string host, int port, Database &db,
@@ -169,6 +226,7 @@ HttpServer::HttpServer(std::string host, int port, Database &db,
       db_(db),
       jwt_(std::move(jwt_config.secret), jwt_config.expires_seconds),
       user_store_(db),
+      problem_store_(db),
       rate_limiter_(auth::RateLimiter::Config{}),
       account_gen_(),
       register_service_(db, account_gen_),
@@ -226,6 +284,18 @@ void HttpServer::setup_routes() {
   svr_.Post("/api/me/password", [this](const httplib::Request &req,
                                        httplib::Response &res) {
     handle_change_password(req, res);
+  });
+
+  // 题目接口为公开接口：未携带 token 时按游客处理，携带时复用已有身份验证。
+  svr_.Get("/api/problems", [this](const httplib::Request &req,
+                                   httplib::Response &res) {
+    handle_problem_list(req, res);
+  });
+  // 详情路径用正则匹配任意非空路径段，便于对非法 ID 返回明确的 400（而非 404）。
+  // [^/]+ 不匹配斜杠，因此不会吞掉后续 /api/problems/{id}/submit 等子路径。
+  svr_.Get(R"(/api/problems/([^/]+))", [this](const httplib::Request &req,
+                                              httplib::Response &res) {
+    handle_problem_detail(req, res);
   });
 
   // 测试专用路由：仅 enable_test_routes_ 为 true（集成测试）时注册，
@@ -412,6 +482,102 @@ void HttpServer::handle_change_password(const httplib::Request &req,
       send_error(res, 500, "内部错误");
       return;
   }
+}
+
+bool HttpServer::resolve_viewer(const httplib::Request &req,
+                                httplib::Response &res, bool &is_admin) {
+  is_admin = false;
+  const std::string authorization = req.get_header_value("Authorization");
+  if (authorization.empty()) {
+    return true; // 游客
+  }
+
+  std::string token;
+  if (!auth::extract_bearer_token(authorization, token)) {
+    send_error(res, 401, "未提供有效的认证信息");
+    return false;
+  }
+
+  auth::AuthUser user;
+  std::string err;
+  switch (auth::authenticate_request(jwt_, user_store_, token, user, err)) {
+    case auth::AuthResult::Ok:
+      break;
+    case auth::AuthResult::Unauthorized:
+      // 验证失败的 token 绝不当作管理员（或普通用户）身份，沿用 401 约定。
+      send_error(res, 401, "认证失败");
+      return false;
+    case auth::AuthResult::InternalError:
+      send_error(res, 500, "内部错误");
+      return false;
+  }
+
+  // 只有通过 M1.3 管理员检查（已登录 + 已完成首次改密 + admin 角色）才可查看隐藏题。
+  is_admin = auth::check_admin(user) == auth::AdminCheck::Ok;
+  return true;
+}
+
+void HttpServer::handle_problem_list(const httplib::Request &req,
+                                     httplib::Response &res) {
+  bool is_admin = false;
+  if (!resolve_viewer(req, res, is_admin)) {
+    return;
+  }
+
+  std::vector<ProblemSummary> problems;
+  std::string err;
+  if (!problem_store_.list(is_admin, problems, err)) {
+    log(LogLevel::Error, "题目列表查询失败: " + err);
+    send_error(res, 500, "内部错误");
+    return;
+  }
+
+  json list = json::array();
+  for (const ProblemSummary &problem : problems) {
+    list.push_back(problem_summary_json(problem));
+  }
+  json body;
+  body["problems"] = std::move(list);
+  body["total"] = problems.size();
+  send_json(res, 200, body);
+}
+
+void HttpServer::handle_problem_detail(const httplib::Request &req,
+                                       httplib::Response &res) {
+  std::int64_t id = 0;
+  if (req.matches.size() < 2 || !parse_problem_id(req.matches[1].str(), id)) {
+    send_error(res, 400, "非法题目 ID");
+    return;
+  }
+
+  bool is_admin = false;
+  if (!resolve_viewer(req, res, is_admin)) {
+    return;
+  }
+
+  bool found = false;
+  ProblemRecord problem;
+  std::string err;
+  if (!problem_store_.find_by_id(id, found, problem, err)) {
+    log(LogLevel::Error, "题目详情查询失败: " + err);
+    send_error(res, 500, "内部错误");
+    return;
+  }
+  // 不存在的题目与当前用户无权查看的隐藏题目统一返回 404，避免通过状态码差异
+  // 探测隐藏题目是否存在，也避免通过直接请求 ID 绕过可见性限制。
+  if (!found || (!problem.visible && !is_admin)) {
+    send_error(res, 404, "题目不存在");
+    return;
+  }
+
+  std::vector<SampleCase> samples;
+  if (!problem_store_.list_samples(id, samples, err)) {
+    log(LogLevel::Error, "题目样例查询失败: " + err);
+    send_error(res, 500, "内部错误");
+    return;
+  }
+
+  send_json(res, 200, problem_detail_json(problem, samples));
 }
 
 void HttpServer::handle_test_admin_only(const httplib::Request &req,

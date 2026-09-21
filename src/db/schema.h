@@ -7,10 +7,15 @@ namespace oj {
 
 class Database;
 
+// 仅创建/迁移数据库结构（建表、补充后续阶段新增列、建索引），不涉及管理员账号。
+// 整个过程在单个事务中完成，失败回滚。供「只导入种子数据」等不需要 admin 的场景
+// 复用；重复执行保留已有数据，不重建、不清空。
+bool ensure_schema(Database &db, std::string &error);
+
 // 初始化数据库结构，并在首次启动（尚无 admin）时预置管理员账号。
 //
 // 整个过程在单个事务中完成：建表（IF NOT EXISTS，重复初始化保留已有数据）、
-// 建索引、按需创建 admin。任一步失败即回滚，不会留下部分初始化的状态。
+// 迁移新增列、建索引、按需创建 admin。任一步失败即回滚，不会留下部分初始化的状态。
 //
 // admin_password 仅在「数据库中没有 admin」时被读取：
 //   - 无 admin 且未提供密码 -> 返回 false，error 提示设置 OJ_ADMIN_PASSWORD；
