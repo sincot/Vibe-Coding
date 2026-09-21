@@ -88,6 +88,11 @@ add_library(oj_core STATIC
   src/auth/context.cpp
   src/auth/authorize.cpp
   src/auth/password_change.cpp
+  src/judge/executor.cpp
+  src/judge/comparator.cpp
+  src/judge/workspace.cpp
+  src/judge/local_executor.cpp
+  src/judge/judge.cpp
 )
 
 target_include_directories(oj_core PUBLIC
@@ -271,3 +276,24 @@ add_executable(oj_http_server_test
 target_link_libraries(oj_http_server_test PRIVATE oj_core GTest::gtest_main)
 
 add_test(NAME http_server_unit COMMAND oj_http_server_test)
+
+# M1.5 判题核心单元测试（gtest）：输出归一化/比对、状态汇总、语言解析，以及用
+# FakeExecutor 驱动 JudgeEngine 的编排逻辑（不启动真实进程，不触碰数据库/网络）。
+add_executable(oj_judge_unit
+  tests/unit/test_judge_unit.cpp
+)
+
+target_link_libraries(oj_judge_unit PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME judge_unit COMMAND oj_judge_unit)
+
+# M1.5 判题编译与进程集成测试（真实 g++/gcc + fork/exec，隔离临时工作目录）：
+# C++17/C11 的 AC/WA、CE、顺序执行、每点新进程、超时回收、超大输出、提前退出、
+# 编译器缺失、临时目录清理与子进程回收。
+add_executable(oj_judge_integration
+  tests/integration/test_judge_integration.cpp
+)
+
+target_link_libraries(oj_judge_integration PRIVATE oj_core)
+
+add_test(NAME judge_integration COMMAND oj_judge_integration)

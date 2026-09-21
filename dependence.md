@@ -181,3 +181,35 @@ mount | grep oj-tmpfs
 - 通过环境变量 `OJ_JWT_SECRET` 提供 HS256 签名密钥（必填，长度不少于 16 字节，无默认值）。
 - 有效期通过 `OJ_JWT_EXPIRES_SECONDS` 配置（可选，默认 3600 秒）。
 - 密钥不写入源码、版本控制或日志；保持同一密钥重启后，未过期的 token 仍可验证。
+
+---
+
+## 7. 判题器运行说明（M1.5 起）
+
+### 7.1 新增依赖
+
+M1.5 判题器**不新增系统依赖**：
+
+- 判题语言 C++17 / C11 的编译器 `g++` / `gcc` 由 2.1 节的 `build-essential` 提供；
+- 单元测试继续使用 3.6 节的 gtest；
+- 本阶段仅通过 `fork` + `execvp`、`pipe`/`poll` 与 `waitpid` 执行进程，未使用
+  `libseccomp`（seccomp 在 M3 接入）。
+
+### 7.2 运行方式
+
+- 判题核心为普通静态库代码，随 `oj_core` 构建，当前不经过 HTTP 与数据库即可调用。
+- 开发验证入口（隔离临时工作目录，不触碰 `data/oj.db`）：
+
+  ```bash
+  cmake --build build --parallel 1
+  ctest --test-dir build -R judge_unit --output-on-failure
+  ctest --test-dir build -R judge_integration --output-on-failure
+  ```
+
+### 7.3 运行环境注意
+
+- 默认在系统临时目录（`std::filesystem::temp_directory_path()`）下用 `mkdtemp` 创建
+  每次判题的独立目录，可经 `JudgeOptions::workspace_root` 覆盖。M3 将改为 3.9 节
+  挂载的 tmpfs 目录 `/opt/oj-tmpfs`。
+- 本阶段只有基础超时与子进程回收，**不是完整沙箱**，不得用于公开接收不可信代码；
+  完整资源限制与系统调用限制在 M3 完成。

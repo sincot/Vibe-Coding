@@ -12,8 +12,9 @@
 - [x] M1.2 登录与身份验证（JWT 签发/校验 + `POST /api/login` + 登录限速 + Bearer 鉴权 + `GET /api/me`）
 - [x] M1.3 改密与权限检查（`POST /api/me/password` + admin 首登强制改密 + 可复用管理员权限检查）
 - [x] M1.4 最小题目数据与查询（`testcases.is_sample` 区分公开样例/隐藏用例 + 3 道幂等种子题 + `GET /api/problems` / `GET /api/problems/{id}` + 题目可见性）
+- [x] M1.5 最小判题器（`IExecutor` 抽象 + `LocalExecutor` + `JudgeEngine`：C++17/C11 编译、逐点执行、基础超时、有界输出、归一化比对与 AC/WA/CE/TLE/RE/SYSERR 汇总；仅开发环境验证，完整沙箱见 M3）
 
-后续阶段（判题器、提交接口、前端）尚未实现。
+后续阶段（提交接口、前端）尚未实现。
 
 ## 环境要求
 
@@ -84,6 +85,20 @@ ctest --test-dir build -R problems_api --output-on-failure
 
 覆盖标签解析；以及种子导入内容与用例顺序、重复导入幂等不覆盖、游客/普通用户/管理员的
 可见范围、首改限制、隐藏用例不泄露、空库、不存在/非法 ID、数据库故障与重启持久化。
+
+判题器测试（M1.5，单元 + 编译/进程集成，使用隔离临时工作目录，不触数据库）：
+
+```bash
+ctest --test-dir build -R judge_unit --output-on-failure
+ctest --test-dir build -R judge_integration --output-on-failure
+```
+
+`judge_unit` 用 gtest + FakeExecutor 覆盖输出归一化与比对（行尾空白、文末空行、
+行首/行内空白、中间空行、空输出）、汇总规则（AC/WA/RE/TLE/MLE/SYSERR 与混合结果）、
+语言解析，以及编译一次、顺序执行、WA 不阻断后续点、CE/SYSERR 分类、非法输入不返回
+AC 等编排逻辑。`judge_integration` 用真实 g++/gcc 与 fork/exec 覆盖 C++17/C11 的
+AC/WA、CE 诊断、每测试点新进程、超时终止与回收、超大输出有界采集、程序提前退出、
+编译器不可用返回 SYSERR、临时目录与子进程清理。
 
 配置管理单元测试（基于 gtest，无外部依赖，不触碰数据库与网络）：
 
@@ -373,6 +388,63 @@ curl -i http://127.0.0.1:8080/api/problems/1
 - 无效/伪造/过期 token 不会被当作游客或管理员：沿用既有约定返回 `401`。
 - 非法 ID（非数字、负数、0、溢出）返回 `400`；数据库故障返回 `500` 通用文案，
   不泄露 SQL、文件路径或隐藏用例。
+
+### 判题器（M1.5，仅开发环境验证）
+
+判题核心位于 `src/judge/`，不依赖 HTTP 与数据库，可独立调用和测试：
+
+- `IExecutor`（`src/judge/executor.h`）：进程执行抽象，把「如何编译/运行子进程」与
+  「如何比对、汇总」解耦；`LocalExecutor`（`src/judge/local_executor.h`）为当前本机
+  实现，M3 将以 seccomp/setrlimit/tmpfs 沙箱实现替换。
+- `JudgeEngine`（`src/judge/judge.h`）：验证输入 → 创建独立临时工作目录 → 编译一次 →
+  按顺序逐测试点运行 → 归一化比对 → 汇总，返回 `JudgeResult`（含逐点结果）。
+- `normalize_output` / `outputs_match`（`src/judge/comparator.h`）：输出归一化与比对，
+  纯函数，可单测。
+
+**开发环境调用方式**：本阶段不提供 HTTP 提交接口，直接通过上述测试入口即可不经过
+HTTP 与数据库独立验证判题流程（见「测试」一节的 `judge_unit` / `judge_integration`）。
+库调用示例：
+
+```cpp
+oj::judge::LocalExecutor executor;
+oj::judge::JudgeOptions options;            // 可选：workspace_root、超时、输出上限等
+oj::judge::JudgeEngine engine(executor, options);
+
+oj::judge::JudgeTask task;
+task.language   = "cpp17";                  // 或 "c11"
+task.source_code = source;
+task.testcases  = {{"1 2\n", "3\n"}};       // input / expected output
+task.time_limit_ms = 2000;
+oj::judge::JudgeResult result = engine.judge(task);
+result.status;                              // AC/WA/CE/TLE/RE/MLE/SYSERR
+```
+
+当前支持的判题行为：
+
+- **语言与编译**：C++17 使用 `g++ -O2 -std=c++17 <src> -o program -lm`，C11 使用
+  `gcc -O2 -std=c11 <src> -o program -lm`；均通过参数数组直接 `execvp` 启动，不拼接
+  shell 命令。**尚未接入 ASan/UBSan**，属 M3.4。
+- **工作目录**：每次判题经 `mkdtemp` 创建唯一目录（默认系统临时目录，可配置），保存
+  源码与编译产物，结束后只删除本次目录。M3 将改为 tmpfs 下的随机目录。
+- **编译结果**：编译进程正常且退出码为 0 视为成功；非零退出码返回 `CE`，并附有长度
+  上限的编译诊断；编译器不存在、无法创建目录等环境故障返回 `SYSERR`，不伪装为 `CE`；
+  编译过程有保护超时。
+- **逐点运行**：每个测试点启动**新的**进程，输入经标准输入传入，标准输出与标准错误
+  分别采集；输出有界（标准输出 64KB、标准错误 16KB，超限只标记截断并继续排空管道），
+  标准输出超限不会被当作正常输出判为 `AC`。
+- **超时**：单测试点超时（默认上限 60s，SPEC JUDGE-10）后 `SIGKILL` 强杀并通过
+  `waitpid` 回收；超时计为 `TLE`。
+- **比对**：去除每行行尾空白与文末空行后逐字符比较；保留行首空白、行内空白与中间
+  空行的意义，不做分词比较。程序非正常退出（信号或非零退出码）计为 `RE`。
+- **汇总**：按顺序执行全部测试点，普通 `WA` 不阻止后续测试点；全部 `AC` 才返回 `AC`，
+  否则按 `SYSERR > TLE > MLE > RE > WA > AC` 取最严重状态。空测试集、非法语言、无效
+  时间配置均返回明确的 `SYSERR`，绝不因未执行任何测试点而返回 `AC`。
+- **清理**：成功、`CE`、`RE`、`TLE` 等所有路径都会关闭文件描述符、回收子进程并删除
+  本次临时目录。
+
+> **安全边界**：本阶段只有基础超时与进程清理，**没有** setrlimit、seccomp、tmpfs 与
+> 内存限制，也**不是完整沙箱**，仅用于开发环境验证；不得用于公开接收不可信代码。
+> 完整 MLE 判定、Sanitizer 诊断与异常分类在 M3 完成。
 
 ### 登录限速
 
