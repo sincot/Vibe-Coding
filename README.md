@@ -13,8 +13,9 @@
 - [x] M1.3 改密与权限检查（`POST /api/me/password` + admin 首登强制改密 + 可复用管理员权限检查）
 - [x] M1.4 最小题目数据与查询（`testcases.is_sample` 区分公开样例/隐藏用例 + 3 道幂等种子题 + `GET /api/problems` / `GET /api/problems/{id}` + 题目可见性）
 - [x] M1.5 最小判题器（`IExecutor` 抽象 + `LocalExecutor` + `JudgeEngine`：C++17/C11 编译、逐点执行、基础超时、有界输出、归一化比对与 AC/WA/CE/TLE/RE/SYSERR 汇总；仅开发环境验证，完整沙箱见 M3）
+- [x] M1.6 提交接口与持久化（`POST /api/problems/{id}/submit`：登录/首改/可见性校验 + 后端隐藏用例判题 + 单事务写入 `submissions` 与 `user_problem_status` + 同步返回逐点结果）
 
-后续阶段（提交接口、前端）尚未实现。
+后续阶段（提交历史页面、排行榜、Rejudge、完整沙箱与判题线程池、前端）尚未实现。
 
 ## 环境要求
 
@@ -99,6 +100,21 @@ ctest --test-dir build -R judge_integration --output-on-failure
 AC 等编排逻辑。`judge_integration` 用真实 g++/gcc 与 fork/exec 覆盖 C++17/C11 的
 AC/WA、CE 诊断、每测试点新进程、超时终止与回收、超大输出有界采集、程序提前退出、
 编译器不可用返回 SYSERR、临时目录与子进程清理。
+
+提交接口与持久化测试（M1.6，单元 + 集成，隔离临时库 + 随机端口 + 可注入执行器）：
+
+```bash
+ctest --test-dir build -R submit_unit --output-on-failure
+ctest --test-dir build -R submit_api --output-on-failure
+```
+
+`submit_unit` 覆盖语言取值解析、源码校验（空/纯空白/超长/边界）与做题状态计算
+（首次失败、首次 AC、重复 AC 不覆盖、AC 后失败不清除）。`submit_api` 通过真实 HTTP
+覆盖：真实 g++/gcc 的 C++17/C11 AC、WA/CE 返回与入库、源码完整保存、认证/首改/
+可见性/参数校验被拒且不产生记录、额外字段无法改变归属或结果、首次失败与首次 AC 的
+状态与计数、多用户多题独立、8 路并发不丢计数且只有一条状态记录、SYSERR 记录与计数、
+持久化事务中途失败整体回滚、通过点不泄露隐藏用例、重启后源码/结果/次数/AC 状态/
+首次 AC 时间保留。
 
 配置管理单元测试（基于 gtest，无外部依赖，不触碰数据库与网络）：
 
@@ -389,6 +405,77 @@ curl -i http://127.0.0.1:8080/api/problems/1
 - 非法 ID（非数字、负数、0、溢出）返回 `400`；数据库故障返回 `500` 通用文案，
   不泄露 SQL、文件路径或隐藏用例。
 
+### 提交接口（M1.6）
+
+`POST /api/problems/{id}/submit`（需登录），同步判题并返回本次提交的结果。请求体为
+JSON，仅读取 `language` 与 `code`；用户归属取自已验证的当前用户上下文，客户端传入的
+`user_id`/`id`/`status`/`testcases` 等字段一律忽略。
+
+```bash
+curl -i -X POST http://127.0.0.1:8080/api/problems/1/submit \
+  -H 'Authorization: Bearer <token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"language":"cpp17","code":"#include <iostream>\nint main(){long long a,b;std::cin>>a>>b;std::cout<<a+b<<\"\\n\";}"}'
+```
+
+成功响应（`200`，判题结果本身不是 HTTP 故障，CE/WA/TLE/RE/SYSERR 同样返回 `200`）：
+
+```
+{"id":12,"problem_id":1,"language":"cpp17","status":"AC","passed":5,"total":5,
+ "runtime_ms":18,"memory_kb":null,"compile_ok":true,"compile_output":"",
+ "message":"全部测试点通过","created_at":"2026-09-21 12:00:00",
+ "results":[{"index":0,"status":"AC","time_ms":3,"memory_kb":null},
+            {"index":1,"status":"AC","time_ms":4,"memory_kb":null}]}
+```
+
+- `language`：仅接受 `cpp17`（C++17）与 `c11`（C11），大小写不敏感；其它取值返回
+  `400`。入库保存规范小写值。
+- `code`：完整用户源码，原样送入编译与入库，不做裁剪或修改。
+- `status`：`AC/WA/CE/TLE/RE/MLE/SYSERR`。`runtime_ms` 为各测试点执行耗时之和。
+- `memory_kb`：**固定为 `null`**——M1.6 判题器尚未采集内存，明确表示未采集，不伪造
+  测量结果（真实内存采集在 M3.4）。
+- `results`：逐测试点结果。通过（AC）测试点只含 `index/status/time_ms/memory_kb`，
+  **绝不附带隐藏测试输入或标准答案**；`WA` 点按 SPEC PRB-05/JUDGE-07 附上该失败点的
+  `input`/`expected_output`/`actual_output`。仅本次提交者可见。
+- 编译失败返回 `status:"CE"` 并在 `compile_output` 给出编译器诊断，`results` 为空。
+
+参数与权限规则：
+
+| 检查 | 结果 |
+|---|---|
+| `language`/`code` 缺失、类型错误、非法 JSON、非对象请求体 | `400` |
+| 不支持的语言、纯空白源码 | `400` |
+| 源码超过 64 KiB（字节） | `400` |
+| 请求体超过 1 MiB | `413`（由服务器在解析前拒绝） |
+| 非法题目 ID（非数字/0/负数/溢出） | `400` |
+| 题目不存在，或普通用户向隐藏题提交 | `404`（统一，不泄露存在性） |
+| 未登录 / 无效 token | `401` |
+| 尚未完成首次强制改密 | `403` + `code:"PASSWORD_CHANGE_REQUIRED"` |
+| 数据库写入等内部故障 | `500`（不声称保存成功，不泄露 SQL/路径） |
+
+提交与统计口径：
+
+- 用户身份只来自已验证的当前用户上下文（token + 按 `sub` 回查数据库）；客户端无法
+  指定或伪造提交归属。
+- 判题用例、顺序与时限全部从后端数据库读取（含隐藏用例），不接受客户端提供的标准
+  答案、用例或资源限制覆盖值；判题期间不持有数据库事务。
+- **参数或权限检查失败不创建提交、不增加次数**；产生并保存的判题结果（含 CE、WA、
+  TLE、RE、MLE）以及内部判题故障产生的 `SYSERR` 都是提交记录，均使 `submit_count`
+  加一（SYSERR 也保存并计数，与「检查失败无记录」区分，保持记录与统计一致）。
+- `user_problem_status`：首次有效提交创建记录；首次 AC 设置 `accepted` 与
+  `first_ac_at`；重复 AC 保留首次 AC 时间；AC 之后的失败提交不清除已通过状态。
+- 提交记录写入与做题状态更新在**同一个短事务**内完成，任一失败整体回滚；并发提交
+  由连接级事务互斥 + `BEGIN IMMEDIATE` 串行化，并依靠 `UNIQUE(user_id, problem_id)`
+  约束保证不重复创建状态记录、不丢失计数。`submissions.created_at` 与
+  `user_problem_status.first_ac_at` 采用同一时间口径，便于后续 Rejudge 按原提交时间重算。
+- 判题阶段（编译 + 逐点运行）在进程内**串行**执行：M1.6 的执行器不提供并发保证，
+  故对判题加简单可靠的互斥保护，避免 HTTP 并发下临时目录/执行状态混用；M3 将以
+  worker 线程池替代，本阶段不引入。
+
+> **安全边界（重要）**：M1.6 调用的仍是 M1.5 的开发环境判题器，**没有**完整沙箱
+> （无 setrlimit/seccomp/tmpfs），完成提交接口不代表已完成安全隔离，**不得公开接收
+> 不可信代码**。完整沙箱、线程池与 Rejudge 见 M3。
+
 ### 判题器（M1.5，仅开发环境验证）
 
 判题核心位于 `src/judge/`，不依赖 HTTP 与数据库，可独立调用和测试：
@@ -401,9 +488,9 @@ curl -i http://127.0.0.1:8080/api/problems/1
 - `normalize_output` / `outputs_match`（`src/judge/comparator.h`）：输出归一化与比对，
   纯函数，可单测。
 
-**开发环境调用方式**：本阶段不提供 HTTP 提交接口，直接通过上述测试入口即可不经过
-HTTP 与数据库独立验证判题流程（见「测试」一节的 `judge_unit` / `judge_integration`）。
-库调用示例：
+**调用方式**：M1.6 起已通过 `POST /api/problems/{id}/submit` 接入 HTTP 与持久化
+（见「提交接口」一节）；判题核心仍可独立调用，用于开发环境不经过 HTTP 与数据库地
+验证判题流程（见「测试」一节的 `judge_unit` / `judge_integration`）。库调用示例：
 
 ```cpp
 oj::judge::LocalExecutor executor;
@@ -460,15 +547,16 @@ result.status;                              // AC/WA/CE/TLE/RE/MLE/SYSERR
 
 | 状态码 | 含义 |
 |---|---|
-| `200` | 登录成功 / 获取用户信息成功 / 修改密码成功 |
+| `200` | 登录成功 / 获取用户信息成功 / 修改密码成功 / 提交并返回判题结果（含 CE/WA/TLE/RE/SYSERR） |
 | `201` | 注册成功 |
-| `400` | 非法输入：JSON 解析失败、字段缺失/类型错误、非法昵称/密码/账号/密码为空、非法新密码、新密码与旧密码相同、非法题目 ID |
+| `400` | 非法输入：JSON 解析失败、字段缺失/类型错误、非法昵称/密码/账号/密码为空、非法新密码、新密码与旧密码相同、非法题目 ID、不支持的语言、空/纯空白/超长源码 |
 | `401` | 登录失败（账号或密码错误）/ 认证无效（缺失、损坏、伪造、篡改、过期、无签名、算法不匹配或引用不存在用户等 token）/ 旧密码错误 |
 | `403` | 权限不足（非管理员访问管理员功能）/ 必须先改密（含 `code:"PASSWORD_CHANGE_REQUIRED"`） |
-| `404` | 题目不存在，或当前用户无权查看的隐藏题目（统一返回，不区分） |
+| `404` | 题目不存在，或当前用户无权查看/提交的隐藏题目（统一返回，不区分） |
 | `409` | 昵称已被使用（含并发冲突） |
+| `413` | 请求体超过服务器上限（1 MiB，在解析前拒绝） |
 | `429` | 登录尝试过于频繁（触发限速） |
-| `500` | 内部故障 |
+| `500` | 内部故障（含提交持久化失败，不声称已保存，不泄露 SQL/路径） |
 
 ### 停止服务
 

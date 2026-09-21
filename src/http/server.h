@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -16,6 +17,9 @@
 #include "auth/register.h"
 #include "db/problems.h"
 #include "db/users.h"
+#include "judge/executor.h"
+#include "judge/judge.h"
+#include "submit/submit.h"
 
 namespace oj {
 
@@ -31,10 +35,16 @@ class Database;
 // enable_test_routes 仅用于集成测试：为 true 时额外注册测试专用路由（如
 // /api/test/admin-only），用于在正式管理员业务接口（M2）落地前验证管理员权限
 // 与首次改密限制的组合行为。正式服务始终以 false 启动，不暴露测试入口。
+//
+// judge_executor 供测试注入可控执行器（如模拟内部判题故障、跳过真实编译）。
+// 为 nullptr 时使用默认的 LocalExecutor（仅开发环境验证）。judge_options 可覆盖
+// 判题工作目录等配置。正式服务无需传入二者。
 class HttpServer {
 public:
   HttpServer(std::string host, int port, Database &db, auth::JwtConfig jwt_config,
-             bool enable_test_routes = false);
+             bool enable_test_routes = false,
+             judge::IExecutor *judge_executor = nullptr,
+             judge::JudgeOptions judge_options = {});
   ~HttpServer();
 
   HttpServer(const HttpServer &) = delete;
@@ -62,6 +72,7 @@ private:
                            httplib::Response &res);
   void handle_problem_detail(const httplib::Request &req,
                              httplib::Response &res);
+  void handle_submit(const httplib::Request &req, httplib::Response &res);
   void handle_test_admin_only(const httplib::Request &req,
                               httplib::Response &res);
 
@@ -82,6 +93,10 @@ private:
   auth::RegisterService register_service_;
   auth::LoginService login_service_;
   auth::ChangePasswordService change_password_service_;
+  // 判题执行器与提交服务：owned_executor_ 仅在未注入执行器时创建。
+  std::unique_ptr<judge::IExecutor> owned_executor_;
+  judge::IExecutor *judge_executor_ = nullptr;
+  std::unique_ptr<submit::SubmitService> submit_service_;
   bool enable_test_routes_;
   httplib::Server svr_;
   std::thread listen_thread_;

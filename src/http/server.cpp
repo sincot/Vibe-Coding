@@ -8,6 +8,7 @@
 
 #include "auth/password_change.h"
 #include "auth/validation.h"
+#include "judge/local_executor.h"
 #include "log.h"
 
 namespace oj {
@@ -220,7 +221,9 @@ json problem_detail_json(const ProblemRecord &problem,
 } // namespace
 
 HttpServer::HttpServer(std::string host, int port, Database &db,
-                       auth::JwtConfig jwt_config, bool enable_test_routes)
+                       auth::JwtConfig jwt_config, bool enable_test_routes,
+                       judge::IExecutor *judge_executor,
+                       judge::JudgeOptions judge_options)
     : host_(std::move(host)),
       port_(port),
       db_(db),
@@ -233,6 +236,19 @@ HttpServer::HttpServer(std::string host, int port, Database &db,
       login_service_(db, jwt_),
       change_password_service_(db),
       enable_test_routes_(enable_test_routes) {
+  // 判题执行器：测试可注入可控实现；正式运行使用默认 LocalExecutor（仅开发环境
+  // 验证，完整沙箱在 M3 提供）。
+  if (judge_executor != nullptr) {
+    judge_executor_ = judge_executor;
+  } else {
+    owned_executor_ = std::make_unique<judge::LocalExecutor>();
+    judge_executor_ = owned_executor_.get();
+  }
+  submit_service_ = std::make_unique<submit::SubmitService>(
+      db, *judge_executor_, std::move(judge_options));
+
+  // 限制请求体上限，防止超大请求打爆内存；超长源码另在提交接口按字节上限校验。
+  svr_.set_payload_max_length(submit::kMaxRequestBodyBytes);
   svr_.set_socket_options(configure_socket);
 }
 
@@ -297,6 +313,12 @@ void HttpServer::setup_routes() {
                                               httplib::Response &res) {
     handle_problem_detail(req, res);
   });
+  // 提交接口（M1.6，需登录）。与详情路由方法不同，互不干扰；ID 段同样用
+  // [^/]+ 以对非法 ID 返回明确的 400。
+  svr_.Post(R"(/api/problems/([^/]+)/submit)",
+            [this](const httplib::Request &req, httplib::Response &res) {
+              handle_submit(req, res);
+            });
 
   // 测试专用路由：仅 enable_test_routes_ 为 true（集成测试）时注册，
   // 用于在正式管理员业务接口落地前验证管理员权限与首次改密限制的组合行为。
@@ -578,6 +600,129 @@ void HttpServer::handle_problem_detail(const httplib::Request &req,
   }
 
   send_json(res, 200, problem_detail_json(problem, samples));
+}
+
+void HttpServer::handle_submit(const httplib::Request &req,
+                               httplib::Response &res) {
+  // 1. 校验题目 ID（非法 ID 属客户端输入错误）。
+  std::int64_t problem_id = 0;
+  if (req.matches.size() < 2 ||
+      !parse_problem_id(req.matches[1].str(), problem_id)) {
+    send_error(res, 400, "非法题目 ID");
+    return;
+  }
+
+  // 2. 登录校验：提交必须来自已验证的当前用户，用户归属不由客户端指定。
+  std::string token;
+  if (!auth::extract_bearer_token(req.get_header_value("Authorization"), token)) {
+    send_error(res, 401, "未提供有效的认证信息");
+    return;
+  }
+
+  auth::AuthUser user;
+  std::string err;
+  switch (auth::authenticate_request(jwt_, user_store_, token, user, err)) {
+    case auth::AuthResult::Ok:
+      break;
+    case auth::AuthResult::Unauthorized:
+      send_error(res, 401, "认证失败");
+      return;
+    case auth::AuthResult::InternalError:
+      send_error(res, 500, "内部错误");
+      return;
+  }
+
+  // 3. 首次强制改密限制：尚未完成必要改密的用户不能提交。
+  if (auth::requires_password_change(user)) {
+    send_password_change_required(res);
+    return;
+  }
+
+  // 4. 请求体与参数校验。只读取 language 与 code；客户端传入的 user_id / id /
+  //    status / testcases 等字段一律忽略，无法改变提交归属或判题结果。
+  json parsed;
+  try {
+    parsed = json::parse(req.body);
+  } catch (const std::exception &) {
+    send_error(res, 400, "请求体不是合法的 JSON");
+    return;
+  }
+  if (!parsed.is_object()) {
+    send_error(res, 400, "请求体必须是 JSON 对象");
+    return;
+  }
+  if (!parsed.contains("language") || !parsed["language"].is_string()) {
+    send_error(res, 400, "缺少字段或类型错误：language 须为字符串");
+    return;
+  }
+  if (!parsed.contains("code") || !parsed["code"].is_string()) {
+    send_error(res, 400, "缺少字段或类型错误：code 须为字符串");
+    return;
+  }
+
+  std::string canonical_language;
+  if (!submit::parse_submission_language(parsed["language"].get<std::string>(),
+                                         canonical_language)) {
+    send_error(res, 400, "不支持的语言：仅支持 cpp17（C++17）与 c11（C11）");
+    return;
+  }
+  const std::string source_code = parsed["code"].get<std::string>();
+  std::string code_error;
+  if (!submit::validate_source_code(source_code, code_error)) {
+    send_error(res, 400, code_error);
+    return;
+  }
+
+  // 5. 可见性：管理员（已登录 + 已完成首次改密 + admin 角色）可向隐藏题提交，
+  //    其余用户按 M1.4 规则仅可向可见题提交。
+  const bool is_admin = auth::check_admin(user) == auth::AdminCheck::Ok;
+
+  auto outcome = submit_service_->submit(user.id, problem_id, canonical_language,
+                                         source_code, is_admin);
+  switch (outcome.kind) {
+    case submit::SubmitService::Kind::ProblemNotFound:
+      send_error(res, 404, "题目不存在");
+      return;
+    case submit::SubmitService::Kind::InternalError:
+      log(LogLevel::Error, "提交失败（用户 " + std::to_string(user.id) +
+                               "，题目 " + std::to_string(problem_id) +
+                               "）： " + outcome.error);
+      send_error(res, 500, "内部错误");
+      return;
+    case submit::SubmitService::Kind::Ok:
+      break;
+  }
+
+  const SubmissionRecord &saved = outcome.submission;
+  // 运行日志只记录必要元信息，不写完整源码、token 或隐藏用例内容。
+  log(LogLevel::Info, "提交 #" + std::to_string(saved.id) + "（用户 " +
+                          std::to_string(saved.user_id) + "，题目 " +
+                          std::to_string(saved.problem_id) + "，语言 " +
+                          saved.language + "）：" + saved.status);
+
+  json body;
+  body["id"] = saved.id;
+  body["problem_id"] = saved.problem_id;
+  body["language"] = saved.language;
+  body["status"] = saved.status;
+  body["passed"] = outcome.judge.passed;
+  body["total"] = outcome.judge.total;
+  body["runtime_ms"] = saved.runtime_ms;
+  body["memory_kb"] = nullptr; // 未采集（M1.6 判题器不采集内存）
+  body["compile_ok"] = outcome.judge.compile_ok;
+  body["compile_output"] = saved.compile_msg;
+  body["message"] = outcome.judge.message;
+  body["created_at"] = saved.created_at;
+  try {
+    body["results"] = json::parse(saved.per_case);
+  } catch (const std::exception &) {
+    // 正常路径不会发生；作为内部故障处理，不返回半成品结果。
+    log(LogLevel::Error, "提交 #" + std::to_string(saved.id) +
+                             " 的逐点结果 JSON 解析失败");
+    send_error(res, 500, "内部错误");
+    return;
+  }
+  send_json(res, 200, body);
 }
 
 void HttpServer::handle_test_admin_only(const httplib::Request &req,

@@ -179,8 +179,15 @@ TEST(JwtServiceTest, ForgedSignatureRejected) {
   std::string token, err;
   ASSERT_TRUE(svc.sign(42, token, err));
 
+  // 篡改签名段首字符：其 6 位全部有效，改动必然改变解码后的签名字节。
+  // 不能篡改末字符的低位——32 字节签名编码为 43 个 base64url 字符时，末字符
+  // 仅高 4 位有效、低 2 位为填充，改动填充位不会改变解码签名，会使本用例在
+  // 末字符为 'A' 时偶发地验证通过（原实现的缺陷，约 1/16 概率）。
+  const std::size_t last_dot = token.rfind('.');
+  ASSERT_NE(last_dot, std::string::npos);
+  ASSERT_LT(last_dot + 1, token.size());
   std::string forged = token;
-  char &c = forged.back();
+  char &c = forged[last_dot + 1];
   c = (c == 'A') ? 'B' : 'A';
 
   std::int64_t uid = 0;

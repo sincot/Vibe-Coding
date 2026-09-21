@@ -77,6 +77,7 @@ add_library(oj_core STATIC
   src/db/schema.cpp
   src/db/users.cpp
   src/db/problems.cpp
+  src/db/submissions.cpp
   src/db/seed.cpp
   src/auth/password.cpp
   src/auth/account.cpp
@@ -93,6 +94,7 @@ add_library(oj_core STATIC
   src/judge/workspace.cpp
   src/judge/local_executor.cpp
   src/judge/judge.cpp
+  src/submit/submit.cpp
 )
 
 target_include_directories(oj_core PUBLIC
@@ -297,3 +299,23 @@ add_executable(oj_judge_integration
 target_link_libraries(oj_judge_integration PRIVATE oj_core)
 
 add_test(NAME judge_integration COMMAND oj_judge_integration)
+
+# M1.6 提交校验与状态计算单元测试（gtest）：语言取值、源码校验、做题状态计算。
+add_executable(oj_submit_unit
+  tests/unit/test_submit_unit.cpp
+)
+
+target_link_libraries(oj_submit_unit PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME submit_unit COMMAND oj_submit_unit)
+
+# M1.6 提交接口集成测试（隔离临时库 + 随机端口真实 HTTP + 可注入执行器）：
+# 认证/首改/可见性/参数校验、真实 g++/gcc 的 AC/WA/CE、隐藏用例不泄露、
+# 提交与状态持久化、并发计数、SYSERR 记录、事务回滚与重启持久化。
+add_executable(oj_submit_api_test
+  tests/integration/test_submit_api.cpp
+)
+
+target_link_libraries(oj_submit_api_test PRIVATE oj_core)
+
+add_test(NAME submit_api COMMAND oj_submit_api_test)
