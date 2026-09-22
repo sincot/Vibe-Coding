@@ -1,7 +1,7 @@
 // 顶部导航：品牌、题目入口、当前用户展示与退出登录。
 // 退出登录只清理前端凭证与用户状态，并在提示中说明不代表已撤销服务端 JWT。
 
-import { clearAuth, getUser, isLoggedIn } from "./auth.js";
+import { clearAuth, getUser, isAdmin, isLoggedIn } from "./auth.js";
 import { resetUnauthorizedGuard } from "./api.js";
 import { currentPath, navigate } from "./router.js";
 import { h, showToast } from "./util.js";
@@ -25,6 +25,10 @@ export function renderNav() {
   );
 
   const links = h("div", { class: "nav-links" }, [navLink("题目列表", "/problems")]);
+  // 只有满足「已登录 + 已完成首次改密 + admin 角色」的账号显示管理入口。
+  if (isAdmin()) {
+    links.appendChild(navLink("管理后台", "/admin"));
+  }
   nav.appendChild(links);
   nav.appendChild(h("span", { class: "nav-spacer" }));
 
@@ -65,5 +69,16 @@ export function renderNav() {
         h("a", { class: "nav-link", text: "注册", attrs: { href: "#/register" } }),
       ])
     );
+  }
+
+  // 页脚管理员入口（admin 专属），SPEC 2.6.1。
+  const footerAdmin = document.getElementById("footer-admin");
+  if (footerAdmin) {
+    footerAdmin.replaceChildren();
+    if (isAdmin()) {
+      footerAdmin.appendChild(
+        h("a", { class: "nav-link", text: "管理员入口", attrs: { href: "#/admin" } })
+      );
+    }
   }
 }

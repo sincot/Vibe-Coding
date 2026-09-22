@@ -2,7 +2,8 @@
 // 页面模块导出 (container, context) => cleanup? 的渲染函数。
 // 受保护路由在未登录时重定向到登录页，并携带 redirect 参数以便登录后返回原目标页。
 
-import { isLoggedIn } from "./auth.js";
+import { isAdmin, isLoggedIn, requiresPasswordChange } from "./auth.js";
+import { h, showToast } from "./util.js";
 
 const routes = [];
 let currentCleanup = null;
@@ -24,11 +25,12 @@ function compile(pattern) {
 }
 
 export function addRoute(pattern, handler, options = {}) {
-  const { protected: isProtected = false } = options;
+  const { protected: isProtected = false, adminOnly = false } = options;
   routes.push({
     pattern,
     handler,
     isProtected,
+    adminOnly,
     ...compile(pattern),
   });
 }
@@ -88,6 +90,25 @@ function notFoundRoute() {
   return routes.find((route) => route.pattern === "*") || null;
 }
 
+// 已登录但不具备后台权限时的页面（前端体验层；后端接口仍会独立鉴权）。
+function renderAdminForbidden(container) {
+  const back = h("a", {
+    class: "btn btn-secondary",
+    text: "返回题目列表",
+    attrs: { href: "#/problems" },
+  });
+  container.appendChild(
+    h("div", { class: "card state" }, [
+      h("h1", { class: "page-title", text: "无权访问后台" }),
+      h("div", {
+        class: "alert alert-error",
+        text: "当前账号没有后台管理权限；若权限刚被调整，请刷新页面以获取最新状态。",
+      }),
+      h("div", { attrs: { style: "margin-top:12px;text-align:center" } }, [back]),
+    ])
+  );
+}
+
 export function render() {
   const container = document.getElementById("app");
   if (!container) return;
@@ -114,6 +135,32 @@ export function render() {
   if (route.isProtected && !isLoggedIn()) {
     navigate("/login?redirect=" + encodeURIComponent(raw), { replace: true });
     return;
+  }
+
+  // 后台路由：前端检查身份、角色与首次改密状态，作为页面体验层。
+  // 真正权限仍由后端接口按数据库最新状态执行。
+  if (route.adminOnly) {
+    if (requiresPasswordChange()) {
+      if (currentPath() !== "/password") {
+        showToast("请先完成首次改密后再进入后台");
+        navigate("/password", { replace: true });
+      }
+      return;
+    }
+    if (!isAdmin()) {
+      if (currentCleanup) {
+        try {
+          currentCleanup();
+        } catch (error) {
+          /* 忽略 */
+        }
+        currentCleanup = null;
+      }
+      container.replaceChildren();
+      document.title = "无权访问 · OJ";
+      renderAdminForbidden(container);
+      return;
+    }
   }
 
   if (currentCleanup) {

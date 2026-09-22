@@ -133,6 +133,112 @@ export function statusBadge(status) {
   return h("span", { class: `badge status-${safe}`, text: safe });
 }
 
+// 通用模态框：把内容节点覆盖在页面上，返回 close()。
+// 用于需要明确确认或需要输入（如重置密码）的写操作，避免依赖 window.confirm/prompt。
+export function openModal(contentNode, options = {}) {
+  const overlay = h("div", { class: "modal-overlay" });
+  const dialog = h(
+    "div",
+    { class: "modal", attrs: { role: "dialog", "aria-modal": "true" } },
+    [contentNode]
+  );
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+
+  let closed = false;
+  function close() {
+    if (closed) return;
+    closed = true;
+    document.removeEventListener("keydown", onKey);
+    overlay.remove();
+    if (typeof options.onClose === "function") options.onClose();
+  }
+  function onKey(event) {
+    if (event.key === "Escape" && options.dismissible !== false) close();
+  }
+  document.addEventListener("keydown", onKey);
+  if (options.dismissible !== false) {
+    overlay.addEventListener("mousedown", (event) => {
+      if (event.target === overlay) close();
+    });
+  }
+  return { close, overlay, dialog };
+}
+
+// 确认对话框：返回 Promise<boolean>。body 可为字符串或 DOM 节点。
+export function confirmDialog(options = {}) {
+  const {
+    title = "请确认",
+    body = "",
+    confirmText = "确认",
+    cancelText = "取消",
+    danger = false,
+  } = options;
+  return new Promise((resolve) => {
+    let result = false;
+    const bodyNode = h("div", { class: "modal-body" });
+    if (typeof body === "string") bodyNode.textContent = body;
+    else if (body) bodyNode.appendChild(body);
+
+    const cancel = h("button", {
+      class: "btn btn-secondary",
+      text: cancelText,
+      attrs: { type: "button" },
+    });
+    const confirm = h("button", {
+      class: "btn " + (danger ? "btn-danger" : "btn-primary"),
+      text: confirmText,
+      attrs: { type: "button" },
+    });
+    const content = h("div", {}, [
+      h("h3", { class: "modal-title", text: title }),
+      bodyNode,
+      h("div", { class: "modal-actions" }, [cancel, confirm]),
+    ]);
+
+    const { close } = openModal(content, { onClose: () => resolve(result) });
+    cancel.addEventListener("click", () => {
+      result = false;
+      close();
+    });
+    confirm.addEventListener("click", () => {
+      result = true;
+      close();
+    });
+    setTimeout(() => confirm.focus(), 0);
+  });
+}
+
+// 分页控件：page 从 1 开始。返回元素，页码回调由 onChange 提供。
+export function pagination(page, totalPages, onChange) {
+  const wrap = h("div", { class: "pagination" });
+  const safeTotal = Number.isFinite(totalPages) && totalPages > 0 ? totalPages : 1;
+  const current = Math.min(Math.max(1, page), safeTotal);
+
+  const prev = h("button", {
+    class: "btn btn-secondary btn-sm",
+    text: "上一页",
+    attrs: { type: "button" },
+  });
+  prev.disabled = current <= 1;
+  prev.addEventListener("click", () => onChange(current - 1));
+
+  const next = h("button", {
+    class: "btn btn-secondary btn-sm",
+    text: "下一页",
+    attrs: { type: "button" },
+  });
+  next.disabled = current >= safeTotal;
+  next.addEventListener("click", () => onChange(current + 1));
+
+  wrap.appendChild(prev);
+  wrap.appendChild(
+    h("span", { class: "pagination-info", text: `第 ${current} / ${safeTotal} 页` })
+  );
+  wrap.appendChild(next);
+  return wrap;
+}
+
 export function setBusy(button, busy, busyText = "处理中…", idleText = null) {
   if (!button) return;
   if (busy) {

@@ -10,6 +10,13 @@ import { renderLogin } from "./pages/login.js";
 import { renderPassword } from "./pages/password.js";
 import { renderRegister } from "./pages/register.js";
 import {
+  renderAdminHome,
+  renderAdminProblemForm,
+  renderAdminProblems,
+} from "./pages/admin-problems.js";
+import { renderAdminTestcases } from "./pages/admin-testcases.js";
+import { renderAdminUsers } from "./pages/admin-users.js";
+import {
   addRoute,
   currentPath,
   navigate,
@@ -39,6 +46,20 @@ addRoute("/login", renderLogin);
 addRoute("/password", renderPassword, { protected: true });
 addRoute("/problems", renderProblems);
 addRoute("/problems/:id", renderProblem);
+
+// 后台管理路由（仅管理员；前端检查身份/角色/首改状态，后端接口仍独立鉴权）。
+addRoute("/admin", renderAdminHome, { protected: true, adminOnly: true });
+addRoute("/admin/problems", renderAdminProblems, { protected: true, adminOnly: true });
+addRoute("/admin/problems/new", renderAdminProblemForm, { protected: true, adminOnly: true });
+addRoute("/admin/problems/:id/edit", renderAdminProblemForm, {
+  protected: true,
+  adminOnly: true,
+});
+addRoute("/admin/problems/:id/testcases", renderAdminTestcases, {
+  protected: true,
+  adminOnly: true,
+});
+addRoute("/admin/users", renderAdminUsers, { protected: true, adminOnly: true });
 
 setNotFound((container) => {
   document.title = "页面不存在 · OJ";
