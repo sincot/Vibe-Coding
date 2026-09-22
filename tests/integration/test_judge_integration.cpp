@@ -331,6 +331,21 @@ void test_compiler_unavailable_is_syserr() {
   check(result.cases.empty(), "未执行测试点");
 }
 
+void test_compiler_name_not_found_in_path_is_syserr() {
+  std::cout << "编译器名（无 /）不在 PATH 中：父进程解析失败 -> SYSERR\n";
+  TempDir root("judge_nopath");
+  JudgeOptions options;
+  // 不含 '/'，走父进程 PATH 解析分支；该名字必然不存在。
+  options.cpp_compiler = "oj-nonexistent-compiler-xyz";
+  JudgeResult result = judge_once("cpp17", kCppSum, {{"1 2\n", "3\n"}}, 2000,
+                                  root.path(), options);
+  check(result.status == JudgeStatus::SYSERR, "PATH 未命中判为 SYSERR");
+  check(result.status != JudgeStatus::CE, "未伪装成 CE");
+  check(result.message.find("编译环境故障") != std::string::npos,
+        "给出编译环境故障信息");
+  check(result.cases.empty(), "未执行测试点");
+}
+
 void test_invalid_inputs() {
   std::cout << "空测试集 / 非法语言 / 无效时间：明确结果而非 AC\n";
   TempDir root("judge_invalid");
@@ -465,6 +480,7 @@ int main() {
   test_huge_output_bounded();
   test_early_exit_no_hang();
   test_compiler_unavailable_is_syserr();
+  test_compiler_name_not_found_in_path_is_syserr();
   test_invalid_inputs();
   test_stderr_separate_and_bounded();
   test_whitespace_significance_end_to_end();

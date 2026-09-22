@@ -101,6 +101,7 @@ add_library(oj_core STATIC
   src/judge/workspace.cpp
   src/judge/local_executor.cpp
   src/judge/judge.cpp
+  src/judge/manager.cpp
   src/submit/submit.cpp
 )
 
@@ -307,6 +308,17 @@ target_link_libraries(oj_judge_unit PRIVATE oj_core GTest::gtest_main)
 
 add_test(NAME judge_unit COMMAND oj_judge_unit)
 
+# M3.1 判题调度器单元测试（gtest）：worker 数量规则、同步屏障证明并发、活动任务
+# 上限、有界等待队列满载拒绝与并发入队、结果通道独立、异常隔离、停止排空与回收。
+# 使用可控 handler 与同步机制，不触碰 HTTP/数据库/真实进程。
+add_executable(oj_judge_manager_unit
+  tests/unit/test_judge_manager.cpp
+)
+
+target_link_libraries(oj_judge_manager_unit PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME judge_manager_unit COMMAND oj_judge_manager_unit)
+
 # M1.5 判题编译与进程集成测试（真实 g++/gcc + fork/exec，隔离临时工作目录）：
 # C++17/C11 的 AC/WA、CE、顺序执行、每点新进程、超时回收、超大输出、提前退出、
 # 编译器缺失、临时目录清理与子进程回收。
@@ -337,6 +349,18 @@ add_executable(oj_submit_api_test
 target_link_libraries(oj_submit_api_test PRIVATE oj_core)
 
 add_test(NAME submit_api COMMAND oj_submit_api_test)
+
+# M3.1 判题任务调度 HTTP 集成测试（隔离临时库 + 随机端口 + 受控/真实执行器）：
+# 队列满载 503 且未接收不落库、繁忙时健康检查/题目查询可响应、执行器异常转 SYSERR、
+# 并发首次 AC 最早时间、排队时间不计入运行耗时、真实 C++17/C11 并发判题与子进程回收、
+# 优雅停止排空已接收任务。
+add_executable(oj_submit_scheduling_api_test
+  tests/integration/test_submit_scheduling_api.cpp
+)
+
+target_link_libraries(oj_submit_scheduling_api_test PRIVATE oj_core)
+
+add_test(NAME submit_scheduling_api COMMAND oj_submit_scheduling_api_test)
 
 # M2.1 管理员题目写入字段校验单元测试（gtest）：创建/部分更新的字段校验与规范
 # 化（必填、类型、长度、难度枚举、标签结构、数值范围与默认值）。

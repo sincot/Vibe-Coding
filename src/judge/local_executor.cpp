@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -91,6 +92,39 @@ void append_bounded(std::string &buffer, const char *data, std::size_t size,
   if (take < size) {
     truncated = true;
   }
+}
+
+// 在父进程（多线程环境）中把可执行文件名解析为绝对路径。子进程在 fork 之后只允许
+// 调用异步信号安全函数，故不在子进程内执行 execvp 的 PATH 搜索（可能涉及内存分配，
+// 在多线程下可能死锁）。找不到返回 false。
+bool resolve_in_path(const std::string &name, std::string &out) {
+  if (name.empty()) {
+    return false;
+  }
+  const char *env = std::getenv("PATH");
+  std::string path =
+      (env != nullptr && *env != '\0')
+          ? std::string(env)
+          : std::string("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+  std::size_t start = 0;
+  while (start <= path.size()) {
+    std::size_t end = path.find(':', start);
+    std::string dir = path.substr(
+        start, end == std::string::npos ? std::string::npos : end - start);
+    if (dir.empty()) {
+      dir = ".";
+    }
+    std::string candidate = dir + "/" + name;
+    if (::access(candidate.c_str(), X_OK) == 0) {
+      out = candidate;
+      return true;
+    }
+    if (end == std::string::npos) {
+      break;
+    }
+    start = end + 1;
+  }
+  return false;
 }
 
 } // namespace
@@ -194,10 +228,25 @@ ProcessResult LocalExecutor::spawn(const std::vector<std::string> &argv,
     exec_w.reset(p[1]);
   }
 
+  // 在 fork 之前完成 PATH 解析，子进程内不再进行内存分配或复杂逻辑。
+  std::string program = argv[0];
+  if (program.find('/') == std::string::npos) {
+    std::string resolved;
+    if (!resolve_in_path(program, resolved)) {
+      result.launch_error = true;
+      result.launch_error_message =
+          "启动进程失败: 未在 PATH 中找到可执行文件 " + program;
+      return result;
+    }
+    program = std::move(resolved);
+  }
+
   // 在 fork 之前构造 argv 数组，子进程内不再进行内存分配。
+  std::vector<std::string> exec_argv = argv;
+  exec_argv[0] = program;
   std::vector<char *> cargv;
-  cargv.reserve(argv.size() + 1);
-  for (const std::string &arg : argv) {
+  cargv.reserve(exec_argv.size() + 1);
+  for (const std::string &arg : exec_argv) {
     cargv.push_back(const_cast<char *>(arg.c_str()));
   }
   cargv.push_back(nullptr);
@@ -228,7 +277,7 @@ ProcessResult LocalExecutor::spawn(const std::vector<std::string> &argv,
       (void)ignored;
       _exit(127);
     }
-    ::execvp(cargv[0], cargv.data());
+    ::execv(cargv[0], cargv.data());
     int err = errno;
     ssize_t ignored = ::write(exec_w.get(), &err, sizeof(err));
     (void)ignored;

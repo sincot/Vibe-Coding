@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <ctime>
+#include <exception>
 #include <mutex>
 #include <utility>
 
@@ -99,15 +100,17 @@ StatusUpdate compute_status_update(const StatusState &current,
   update.submit_count = current.submit_count + 1;
 
   if (current.accepted) {
-    // 曾经 AC：保留 AC 状态与首次 AC 时间，后续失败或再次 AC 均不覆盖。
+    // 曾经 AC：保留 AC 状态；首次 AC 时间取「最早符合条件的原提交时间」。
+    // 并发任务可能乱序完成，若本次 AC 的原提交时间早于已记录值，则收敛为更早者。
     update.accepted = true;
-    if (!current.first_ac_at.empty()) {
+    std::string best = current.first_ac_at;
+    if (submission_accepted && !submission_time.empty() &&
+        (best.empty() || submission_time < best)) {
+      best = submission_time;
+    }
+    if (!best.empty()) {
       update.has_first_ac_at = true;
-      update.first_ac_at = current.first_ac_at;
-    } else if (submission_accepted) {
-      // 防御性路径：状态为 accepted 但首次 AC 时间为空时补写本次时间。
-      update.has_first_ac_at = true;
-      update.first_ac_at = submission_time;
+      update.first_ac_at = best;
     }
     return update;
   }
@@ -142,7 +145,8 @@ SubmitService::Outcome SubmitService::submit(std::int64_t user_id,
                                              std::int64_t problem_id,
                                              const std::string &language,
                                              const std::string &source_code,
-                                             bool viewer_is_admin) {
+                                             bool viewer_is_admin,
+                                             const std::string &submitted_at) {
   Outcome outcome;
 
   // 1. 题目存在性与可见性（复用 M1.4 规则）。不存在与无权访问统一返回，
@@ -183,12 +187,24 @@ SubmitService::Outcome SubmitService::submit(std::int64_t user_id,
     task.testcases.push_back(std::move(testcase));
   }
 
-  // 3. 同步判题。判题期间不持有数据库事务；M1.6 对判题阶段做串行保护。
+  // 3. 同步判题。判题期间不持有数据库事务；执行器与判题任务均为本次调用独立，
+  //    可被多个 worker 线程并发调用（每任务一个 JudgeEngine）。
   judge::JudgeResult judge_result;
-  {
-    std::lock_guard<std::mutex> judge_lock(judge_mutex_);
+  try {
     judge::JudgeEngine engine(executor_, options_);
     judge_result = engine.judge(task);
+  } catch (const std::exception &e) {
+    // 判题过程抛出异常（如执行器内部故障）转换为既有约定的内部判题错误 SYSERR，
+    // 不假死、不使 worker 退出，用户可重试。
+    judge_result = judge::JudgeResult{};
+    judge_result.status = judge::JudgeStatus::SYSERR;
+    judge_result.total = static_cast<int>(task.testcases.size());
+    judge_result.message = std::string("判题内部错误: ") + e.what();
+  } catch (...) {
+    judge_result = judge::JudgeResult{};
+    judge_result.status = judge::JudgeStatus::SYSERR;
+    judge_result.total = static_cast<int>(task.testcases.size());
+    judge_result.message = "判题内部错误";
   }
 
   long long total_runtime_ms = 0;
@@ -207,7 +223,8 @@ SubmitService::Outcome SubmitService::submit(std::int64_t user_id,
   record.compile_msg = judge_result.compile_output;
   record.runtime_ms = total_runtime_ms;
   record.memory_kb = 0; // 未采集（对外以 null 表示）
-  record.created_at = utc_timestamp_now();
+  // 采用调度器接受入队时采集的原始提交时间；排队等待不计入该时间戳。
+  record.created_at = submitted_at.empty() ? utc_timestamp_now() : submitted_at;
 
   // 4. 单事务持久化：写入提交记录 + 更新用户题目状态。
   std::lock_guard<std::mutex> transaction_lock(db_.transaction_mutex());

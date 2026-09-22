@@ -46,7 +46,31 @@ void send_password_change_required(httplib::Response &res) {
   send_json(res, 403, body);
 }
 
-// 最小健康检查：确认服务存活并正常响应 JSON。
+// 判题等待队列满载：立即拒绝并返回稳定的业务错误标识与重试提示，不阻塞等待、
+// 不无限积压，也不由前端自动重试。
+void send_judge_queue_full(httplib::Response &res) {
+  res.set_header("Retry-After", "1");
+  json body;
+  body["error"] = "判题队列已满，请稍后重试";
+  body["code"] = "JUDGE_QUEUE_FULL";
+  body["retryable"] = true;
+  send_json(res, 503, body);
+}
+
+// 调度器已停止接收（服务正在停止）：同样以 503 明确表示暂时不可用。
+void send_judge_unavailable(httplib::Response &res) {
+  json body;
+  body["error"] = "判题服务暂时不可用";
+  body["code"] = "JUDGE_UNAVAILABLE";
+  body["retryable"] = true;
+  send_json(res, 503, body);
+}
+
+// 除判题并发上限之外额外保留的 HTTP 处理线程数，用于在判题繁忙/队列满载时仍能
+// 应答健康检查与题目查询等非提交请求。取值需覆盖教学规模下的常规并发查询。
+constexpr int kHttpReserveThreads = 8;
+
+// 健康检查：确认服务存活并正常响应 JSON。
 void handle_health(const httplib::Request &, httplib::Response &res) {
   json body;
   body["status"] = "ok";
@@ -263,7 +287,8 @@ json admin_user_summary_json(const UserSummary &user) {
 HttpServer::HttpServer(std::string host, int port, Database &db,
                        auth::JwtConfig jwt_config, bool enable_test_routes,
                        judge::IExecutor *judge_executor,
-                       judge::JudgeOptions judge_options, std::string web_root)
+                       judge::JudgeOptions judge_options, std::string web_root,
+                       judge::JudgeManager::Options manager_options)
     : host_(std::move(host)),
       port_(port),
       db_(db),
@@ -291,6 +316,22 @@ HttpServer::HttpServer(std::string host, int port, Database &db,
   submit_service_ = std::make_unique<submit::SubmitService>(
       db, *judge_executor_, std::move(judge_options));
 
+  // 判题调度器：handler 复用 SubmitService（单次判题 + 持久化），仅负责调度。
+  judge_manager_ = std::make_unique<judge::JudgeManager>(
+      [this](const judge::SubmissionTask &task) {
+        return submit_service_->submit(task.user_id, task.problem_id,
+                                       task.language, task.source_code,
+                                       task.viewer_is_admin, task.submitted_at);
+      },
+      manager_options);
+
+  // 协调 HTTP 处理线程与判题并发：最坏情况下被同步等待占用的 HTTP 线程数不超过
+  // 「正在执行的判题任务 + 等待队列容量」，再额外保留 kHttpReserveThreads 个线程
+  // 用于健康检查与题目查询等请求，避免把阻塞从判题器整体转移到 HTTP 层。
+  http_thread_count_ = judge_manager_->worker_count() +
+                       static_cast<int>(judge_manager_->queue_capacity()) +
+                       kHttpReserveThreads;
+
   // 限制请求体上限，防止超大请求打爆内存；超长源码另在提交接口按字节上限校验。
   svr_.set_payload_max_length(submit::kMaxRequestBodyBytes);
   svr_.set_socket_options(configure_socket);
@@ -302,6 +343,12 @@ HttpServer::~HttpServer() {
 
 bool HttpServer::start(std::string &error) {
   setup_routes();
+
+  // 使用显式大小的请求处理线程池，保证同步等待判题的请求不会占满全部 HTTP 能力。
+  const int http_threads = http_thread_count_ > 0 ? http_thread_count_ : 1;
+  svr_.new_task_queue = [http_threads]() -> httplib::TaskQueue * {
+    return new httplib::ThreadPool(static_cast<std::size_t>(http_threads));
+  };
 
   if (!svr_.bind_to_port(host_.c_str(), port_)) {
     error = "无法绑定 " + host_ + ":" + std::to_string(port_) +
@@ -320,6 +367,12 @@ void HttpServer::stop() {
     if (listen_thread_.joinable()) {
       listen_thread_.join();
     }
+  }
+  // HTTP 处理线程（含正在同步等待判题结果的请求）此时已全部结束；再停止判题
+  // 调度器，执行完已接收任务并回收 worker，保证随后关闭数据库时没有 worker
+  // 仍在使用数据库。幂等：可重复调用。
+  if (judge_manager_) {
+    judge_manager_->shutdown();
   }
 }
 
@@ -876,8 +929,30 @@ void HttpServer::handle_submit(const httplib::Request &req,
   //    其余用户按 M1.4 规则仅可向可见题提交。
   const bool is_admin = auth::check_admin(user) == auth::AdminCheck::Ok;
 
-  auto outcome = submit_service_->submit(user.id, problem_id, canonical_language,
-                                         source_code, is_admin);
+  // 6. 构造自带完整数据的调度任务（不引用请求对象/局部变量/数据库语句），交给
+  //    JudgeManager。原始提交时间在接受入队时采集，排队等待不计入用户程序耗时。
+  judge::SubmissionTask task;
+  task.user_id = user.id;
+  task.problem_id = problem_id;
+  task.language = canonical_language;
+  task.source_code = source_code;
+  task.viewer_is_admin = is_admin;
+  task.submitted_at = submit::utc_timestamp_now();
+
+  judge::JudgeManager::SubmitResult enqueued =
+      judge_manager_->submit(std::move(task));
+  if (enqueued.status == judge::JudgeManager::EnqueueStatus::QueueFull) {
+    // 队列满载：未接收请求不创建提交记录、不增加提交次数（在入队前即被拒绝）。
+    send_judge_queue_full(res);
+    return;
+  }
+  if (enqueued.status == judge::JudgeManager::EnqueueStatus::Stopped) {
+    send_judge_unavailable(res);
+    return;
+  }
+
+  // 7. 同步等待该提交的判题与持久化结果（结果通道与本次请求一一对应）。
+  submit::SubmitService::Outcome outcome = enqueued.future.get();
   switch (outcome.kind) {
     case submit::SubmitService::Kind::ProblemNotFound:
       send_error(res, 404, "题目不存在");

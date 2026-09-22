@@ -2,7 +2,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <mutex>
 #include <string>
 
 #include "db/problems.h"
@@ -52,7 +51,9 @@ struct StatusUpdate {
 // 状态计算（纯函数）：
 //   - 每条已持久化的提交使 submit_count 加一；
 //   - 首次 AC 设置 accepted 与 first_ac_at（取本次提交时间）；
-//   - 重复 AC 保留既有首次 AC 时间，不覆盖；
+//   - 重复 AC 保留既有首次 AC 时间，不覆盖；并发任务乱序完成时，若本次 AC 的
+//     原提交时间早于已记录值，则收敛为更早者，保证首次 AC 时间取最早符合条件的
+//     原提交时间，不因完成顺序倒置而出错；
 //   - AC 之后的失败提交保留既有 accepted 与首次 AC 时间，不清除；
 //   - 从未 AC 的失败提交保持 none 且不写首次 AC 时间。
 StatusUpdate compute_status_update(const StatusState &current,
@@ -93,9 +94,13 @@ public:
   };
 
   // viewer_is_admin=true 时允许向隐藏题目提交（仅供已通过管理员检查的调用方传入）。
+  //
+  // submitted_at 为原始提交时间（调度器接受入队时采集的 UTC 时间字符串），
+  // 用作 submissions.created_at 与 first_ac_at 的统一口径；传入空串时退回当前时间。
+  // 排队等待判题的时间不计入该时间戳，也不计入任何测试点耗时。
   Outcome submit(std::int64_t user_id, std::int64_t problem_id,
                  const std::string &language, const std::string &source_code,
-                 bool viewer_is_admin);
+                 bool viewer_is_admin, const std::string &submitted_at);
 
 private:
   Database &db_;
@@ -104,11 +109,6 @@ private:
   UserProblemStatusStore statuses_;
   judge::IExecutor &executor_;
   judge::JudgeOptions options_;
-
-  // M1.6 的 LocalExecutor 未提供并发保证（临时目录与进程状态按单次判题设计），
-  // 因此对判题阶段做简单、可靠的串行保护，避免 HTTP 并发请求下执行状态混用。
-  // 本阶段不引入 M3 的 worker 线程池；串行只包住判题，不长时间持有数据库事务。
-  std::mutex judge_mutex_;
 };
 
 } // namespace submit

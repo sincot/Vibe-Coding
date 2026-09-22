@@ -23,6 +23,7 @@
 #include "db/users.h"
 #include "judge/executor.h"
 #include "judge/judge.h"
+#include "judge/manager.h"
 #include "submit/submit.h"
 
 namespace oj {
@@ -61,7 +62,8 @@ public:
              bool enable_test_routes = false,
              judge::IExecutor *judge_executor = nullptr,
              judge::JudgeOptions judge_options = {},
-             std::string web_root = "");
+             std::string web_root = "",
+             judge::JudgeManager::Options manager_options = {});
   ~HttpServer();
 
   HttpServer(const HttpServer &) = delete;
@@ -70,10 +72,15 @@ public:
   // 绑定并启动监听。成功返回 true；失败时返回 false 并通过 error 给出原因。
   bool start(std::string &error);
 
-  // 请求停止并等待监听线程退出（可重复调用，幂等）。
+  // 请求停止并等待监听线程退出（可重复调用，幂等）。随后停止判题调度器：不再接收
+  // 新任务，并执行完所有已接收任务后回收 worker，保证在关闭数据库前没有 worker
+  // 仍在使用数据库。
   void stop();
 
   bool is_running() const;
+
+  // 暴露判题调度器，便于集成测试观察 worker / 队列状态（不转移所有权）。
+  judge::JudgeManager *judge_manager() { return judge_manager_.get(); }
 
   // 暴露限速器，便于集成测试验证限速行为（返回引用，测试方可注入时钟）。
   auth::RateLimiter &rate_limiter() { return rate_limiter_; }
@@ -145,6 +152,12 @@ private:
   std::unique_ptr<judge::IExecutor> owned_executor_;
   judge::IExecutor *judge_executor_ = nullptr;
   std::unique_ptr<submit::SubmitService> submit_service_;
+  // 判题任务调度器：持有 worker 线程池与有界等待队列，在 submit_service_ 之后
+  // 构造、之前析构，确保调度器停止时提交服务仍然有效。
+  std::unique_ptr<judge::JudgeManager> judge_manager_;
+  // cpp-httplib 请求处理线程数：>= 调度器并发上限 + 保留量，避免同步等待判题占满
+  // 全部 HTTP 处理能力（健康检查与题目查询始终有可用线程）。
+  int http_thread_count_ = 0;
   bool enable_test_routes_;
   std::string web_root_;
   httplib::Server svr_;

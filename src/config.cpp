@@ -100,6 +100,40 @@ bool parse_args(int argc, char **argv, Config &cfg, bool &want_help,
   return true;
 }
 
+bool read_judge_queue_capacity(int &out, std::string &error) {
+  const char *value = std::getenv("OJ_JUDGE_QUEUE_CAPACITY");
+  if (value == nullptr) {
+    out = kDefaultJudgeQueueCapacity;
+    return true;
+  }
+  const std::string text(value);
+  if (text.empty()) {
+    error = "OJ_JUDGE_QUEUE_CAPACITY 不能为空";
+    return false;
+  }
+  for (char c : text) {
+    if (c < '0' || c > '9') {
+      error = "OJ_JUDGE_QUEUE_CAPACITY 必须是正整数，收到 \"" + text + "\"";
+      return false;
+    }
+  }
+  long parsed = 0;
+  try {
+    parsed = std::stol(text);
+  } catch (...) {
+    error = "OJ_JUDGE_QUEUE_CAPACITY 数值非法: \"" + text + "\"";
+    return false;
+  }
+  if (parsed < 1 || parsed > kMaxJudgeQueueCapacity) {
+    error = "OJ_JUDGE_QUEUE_CAPACITY 须在 1.." +
+            std::to_string(kMaxJudgeQueueCapacity) + " 之间，收到 \"" + text +
+            "\"";
+    return false;
+  }
+  out = static_cast<int>(parsed);
+  return true;
+}
+
 std::optional<std::string> read_admin_password() {
   const char *value = std::getenv("OJ_ADMIN_PASSWORD");
   if (value == nullptr) {

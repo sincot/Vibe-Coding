@@ -368,6 +368,41 @@ TEST(ReadAdminPassword, EmptyStringReturnsEmptyValue) {
 }
 
 // ---------------------------------------------------------------------------
+// read_judge_queue_capacity
+// ---------------------------------------------------------------------------
+
+TEST(ReadJudgeQueueCapacity, UnsetUsesDefault) {
+  EnvGuard guard("OJ_JUDGE_QUEUE_CAPACITY", nullptr);
+  int out = -1;
+  std::string error;
+  EXPECT_TRUE(oj::config::read_judge_queue_capacity(out, error));
+  EXPECT_EQ(out, oj::config::kDefaultJudgeQueueCapacity);
+  EXPECT_TRUE(error.empty());
+}
+
+TEST(ReadJudgeQueueCapacity, AcceptsValidValues) {
+  for (const char *value : {"1", "32", "256"}) {
+    EnvGuard guard("OJ_JUDGE_QUEUE_CAPACITY", value);
+    int out = -1;
+    std::string error;
+    EXPECT_TRUE(oj::config::read_judge_queue_capacity(out, error))
+        << "应接受: " << value;
+    EXPECT_EQ(out, std::stoi(value));
+  }
+}
+
+TEST(ReadJudgeQueueCapacity, RejectsInvalidValues) {
+  for (const char *value : {"", "0", "-1", "257", "abc", "3.5", " 4", "1e3"}) {
+    EnvGuard guard("OJ_JUDGE_QUEUE_CAPACITY", value);
+    int out = -1;
+    std::string error;
+    EXPECT_FALSE(oj::config::read_judge_queue_capacity(out, error))
+        << "应拒绝: '" << value << "'";
+    EXPECT_FALSE(error.empty());
+  }
+}
+
+// ---------------------------------------------------------------------------
 // load_jwt_config
 // ---------------------------------------------------------------------------
 

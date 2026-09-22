@@ -10,6 +10,7 @@
 #include "db/schema.h"
 #include "db/seed.h"
 #include "http/server.h"
+#include "judge/manager.h"
 #include "log.h"
 
 namespace {
@@ -37,7 +38,10 @@ void print_usage(std::ostream &os, const char *prog) {
       << "                     已有 admin 时无需设置。\n"
       << "  OJ_JWT_SECRET      JWT 签名密钥（必需，长度不少于 "
       << oj::auth::kMinJwtSecretLen << " 字节）。\n"
-      << "  OJ_JWT_EXPIRES_SECONDS  JWT 有效期（秒），默认 3600。\n";
+      << "  OJ_JWT_EXPIRES_SECONDS  JWT 有效期（秒），默认 3600。\n"
+      << "  OJ_JUDGE_QUEUE_CAPACITY  判题等待队列容量（等待执行的任务数），\n"
+      << "                           默认 " << oj::config::kDefaultJudgeQueueCapacity
+      << "，取值 1.." << oj::config::kMaxJudgeQueueCapacity << "。\n";
 }
 
 } // namespace
@@ -113,15 +117,32 @@ int main(int argc, char **argv) {
           "JWT 配置已加载（有效期 " +
               std::to_string(jwt_config.expires_seconds) + " 秒）");
 
+  // 判题调度配置：等待队列容量来自环境变量（有默认值、有上限、非法即报错退出）。
+  oj::judge::JudgeManager::Options manager_options;
+  int queue_capacity = oj::config::kDefaultJudgeQueueCapacity;
+  std::string queue_error;
+  if (!oj::config::read_judge_queue_capacity(queue_capacity, queue_error)) {
+    oj::log(oj::LogLevel::Error, "判题队列配置错误: " + queue_error);
+    return 1;
+  }
+  manager_options.queue_capacity = static_cast<std::size_t>(queue_capacity);
+
   oj::HttpServer server(cfg.host, cfg.port, *db, std::move(jwt_config),
                         /*enable_test_routes=*/false,
                         /*judge_executor=*/nullptr,
                         /*judge_options=*/{},
-                        /*web_root=*/cfg.web_root);
+                        /*web_root=*/cfg.web_root,
+                        /*manager_options=*/manager_options);
   if (!server.start(error)) {
     oj::log(oj::LogLevel::Error, "启动失败: " + error);
     return 1;
   }
+
+  oj::log(oj::LogLevel::Info,
+          "判题调度已就绪（worker " +
+              std::to_string(server.judge_manager()->worker_count()) +
+              " 个，等待队列容量 " +
+              std::to_string(server.judge_manager()->queue_capacity()) + "）");
 
   oj::log(oj::LogLevel::Info,
           "HTTP 服务已启动，监听 " + cfg.host + ":" + std::to_string(cfg.port));

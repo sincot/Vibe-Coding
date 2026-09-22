@@ -864,11 +864,54 @@ Vibe-Coding/
 
 #### M3.1 判题任务调度
 
-- [ ] 实现 `JudgeManager` 与有界任务队列。
-- [ ] 接入 worker 线程池，数量为 `min(CPU 核数, 8)`。
-- [ ] 将提交接口接入线程池，保留同步返回方式。
-- [ ] 明确队列满载时的处理方式，避免无限积压。
-- [ ] 验证多个提交可以并发处理。
+- [x] 实现 `JudgeManager` 与有界任务队列。
+- [x] 接入 worker 线程池，数量为 `min(CPU 核数, 8)`。
+- [x] 将提交接口接入线程池，保留同步返回方式。
+- [x] 明确队列满载时的处理方式，避免无限积压。
+- [x] 验证多个提交可以并发处理。
+
+> 实施说明：
+>
+> - **调度分离**：新增 `src/judge/manager.{h,cpp}` 的 `JudgeManager`，统一负责任务接收、
+>   入队、worker 调度与结果交付；单次判题仍复用 `JudgeEngine` + `LocalExecutor`，
+>   持久化仍复用 `SubmitService`，不复制编译/运行/比对/落库逻辑。任务自带 `user_id` /
+>   `problem_id` / `language` / `source_code` / `viewer_is_admin` / 原始提交时间，绝不
+>   引用 HTTP 请求对象、回调局部变量或数据库语句对象。
+> - **worker 数量**：`min(CPU 核数, 8)` 且至少 1。CPU 核数用 `sysconf(_SC_NPROCESSORS_ONLN)`
+>   获取，失败退回 `std::thread::hardware_concurrency()`，仍为 0 或无法获取按 1 处理；
+>   每个 worker 一次处理一个完整提交，同一提交的测试点不额外并行化。
+> - **有界等待队列**：容量表示「已接收但尚未开始执行」的任务数，与正在执行数分开；
+>   默认 `kDefaultQueueCapacity = 32`，经环境变量 `OJ_JUDGE_QUEUE_CAPACITY`（1..256，
+>   非法启动报错退出）配置。入队判断与入队在同一锁内原子完成，并发无法突破容量。
+> - **满载行为**：立即拒绝，`POST /api/problems/{id}/submit` 返回 `503` +
+>   `{"error":"判题队列已满，请稍后重试","code":"JUDGE_QUEUE_FULL","retryable":true}`
+>   与 `Retry-After` 头；前端沿用通用错误展示该文案、不自动重试。未接收请求不创建提交
+>   记录、不增加提交次数。
+> - **结果交付与异常**：每个已接收任务独立 `promise/future`，结果/异常必交付对应请求，
+>   不串用、不重复完成、不永久等待；`handler` 抛异常被捕获为内部错误，worker 继续运行。
+>   执行器异常在 `SubmitService` 内转换为 `SYSERR` 提交记录（沿用 JUDGE-12 约定）。
+> - **执行器并发与 fork 安全**：`LocalExecutor` 无共享可变状态，可多 worker 并发使用；
+>   移除 M1.6 的全局判题串行锁。子进程可执行文件在父进程内解析 `PATH` 后以 `execv`
+>   启动，子进程不再调用非异步信号安全的 `execvp`；各任务只 `waitpid` 自己负责的子进程，
+>   不互相抢退出状态。完整 watchdog 与强制终止仍属 M3.2。
+> - **数据库并发**：连接以 FULLMUTEX 打开，单条语句线程安全；多语句持久化事务继续由
+>   连接级事务互斥 + `BEGIN IMMEDIATE` 串行化，判题等待与编译运行期间不持有写事务。
+>   并发计数、状态更新正确；`compute_status_update` 收敛首次 AC 为最早符合条件的原提交
+>   时间，避免并发乱序完成导致首次 AC 时间错误；原始提交时间在入队时采集，排队时间不
+>   计入运行耗时、不误判 TLE。
+> - **HTTP 并发协调**：cpp-httplib 请求线程数显式设为 `worker 数 + 队列容量 + 8`，保证
+>   同步等待判题最多占用 `worker 数 + 队列容量` 个线程，仍有保留线程响应健康检查与题目
+>   查询；验证繁忙/满载时健康检查与题目查询仍可响应。
+> - **生命周期**：`JudgeManager::shutdown()` 停止接收新任务、唤醒等待线程、排空所有已
+>   接收任务并投递结果后回收 worker；`HttpServer::stop()` 先停 HTTP（含同步等待中的请求）
+>   再停调度器，保证关闭数据库前无 worker 仍在使用数据库，无永久等待的 future。
+> - **验证**：`tests/unit/test_judge_manager.cpp`（同步屏障/计数器，调度边界）、
+>   `tests/integration/test_submit_scheduling_api.cpp`（HTTP 集成：503 不落库、繁忙可响应、
+>   异常恢复、首次 AC 最早时间、排队不计时、真实 C++17/C11 并发、停止排空）与
+>   `tests/unit/test_submit_unit.cpp`、`tests/unit/test_config.cpp`（首次 AC 收敛、队列容量
+>   校验）；回归 `submit_api`、`judge_*`、`admin_*` 等全量 `ctest` 29/29 通过。
+> - **边界**：未提前实现 M3.2～M3.6 的 watchdog 全局硬上限/强制终止、沙箱与资源限制、
+>   完整分类与 Sanitizer、Rejudge；停止时排空已接收任务可能等待现有单次判题保护超时。
 
 #### M3.2 子进程与超时控制
 

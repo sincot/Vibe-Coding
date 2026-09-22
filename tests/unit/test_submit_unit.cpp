@@ -143,6 +143,19 @@ TEST(StatusUpdate, RepeatedAcKeepsFirstAcTime) {
   EXPECT_EQ(update.submit_count, 2);
 }
 
+TEST(StatusUpdate, OutOfOrderAcKeepsEarliestOriginalTime) {
+  // 并发判题乱序完成：较早的原提交时间后到，应收敛为最早时间。
+  StatusState state;
+  state.has_record = true;
+  state.accepted = true;
+  state.first_ac_at = kLaterTime; // 较晚的 AC 先完成并写入
+  state.submit_count = 1;
+  StatusUpdate update = compute_status_update(state, /*AC=*/true, kTime);
+  EXPECT_TRUE(update.accepted);
+  EXPECT_EQ(update.first_ac_at, kTime); // 更早的原提交时间胜出
+  EXPECT_EQ(update.submit_count, 2);
+}
+
 TEST(StatusUpdate, FailureAfterAcKeepsAcceptedStatus) {
   StatusState state;
   state.has_record = true;

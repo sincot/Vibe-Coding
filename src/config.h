@@ -23,6 +23,15 @@ struct Config {
 // 失败返回 false 且不改写 out。
 bool parse_port(const std::string &text, int &out);
 
+// 判题等待队列容量的默认值与上限（等待执行的任务数，非正在执行数）。
+inline constexpr int kDefaultJudgeQueueCapacity = 32;
+inline constexpr int kMaxJudgeQueueCapacity = 256;
+
+// 读取判题等待队列容量环境变量 OJ_JUDGE_QUEUE_CAPACITY。
+// 未设置时写入默认值并返回 true；已设置但非 1..kMaxJudgeQueueCapacity 的整数时
+// 返回 false 并置 error（服务启动报错退出），绝不会无限增长。
+bool read_judge_queue_capacity(int &out, std::string &error);
+
 // 解析命令行参数。want_help=true 表示请求打印帮助（调用方以返回码 0 正常退出）。
 // 返回 false 表示参数非法，error 给出明确原因（调用方以非零返回码退出）。
 bool parse_args(int argc, char **argv, Config &cfg, bool &want_help,
