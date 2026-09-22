@@ -11,6 +11,9 @@ struct Config {
   std::string host = "0.0.0.0";
   int port = 8080;
   std::string db_path = "data/oj.db";
+  // 前端静态资源根目录。仅该目录下的文件可被 HTTP 静态托管访问，项目根目录、
+  // 数据库、配置与判题临时目录均不在其中（详见 README「前端」一节）。
+  std::string web_root = "web";
   // --seed：只导入内置种子题目后退出，不启动 HTTP 服务。默认为 false，
   // 因此正常启动不会无条件重写题目数据。
   bool seed = false;

@@ -95,6 +95,7 @@ TEST(ConfigDefaults, DefaultValues) {
   EXPECT_EQ(cfg.host, "0.0.0.0");
   EXPECT_EQ(cfg.port, 8080);
   EXPECT_EQ(cfg.db_path, "data/oj.db");
+  EXPECT_EQ(cfg.web_root, "web") << "默认前端静态资源目录为 web";
   EXPECT_FALSE(cfg.seed) << "默认不导入种子（正常启动不重写题目数据）";
 }
 
@@ -204,6 +205,35 @@ TEST(ParseArgs, DbOption) {
 
   EXPECT_TRUE(parse_args(args.argc(), args.argv(), cfg, want_help, err));
   EXPECT_EQ(cfg.db_path, "/tmp/oj-test.db");
+}
+
+TEST(ParseArgs, WebRootOption) {
+  Config cfg;
+  bool want_help = false;
+  std::string err;
+  Argv args({"--web", "/srv/oj/web"});
+
+  EXPECT_TRUE(parse_args(args.argc(), args.argv(), cfg, want_help, err));
+  EXPECT_EQ(cfg.web_root, "/srv/oj/web");
+}
+
+TEST(ParseArgs, WebRootMissingOrEmptyRejected) {
+  {
+    Config cfg;
+    bool want_help = false;
+    std::string err;
+    Argv args({"--web"});
+    EXPECT_FALSE(parse_args(args.argc(), args.argv(), cfg, want_help, err));
+    EXPECT_NE(err.find("需要一个参数"), std::string::npos);
+  }
+  {
+    Config cfg;
+    bool want_help = false;
+    std::string err;
+    Argv args({"--web", ""});
+    EXPECT_FALSE(parse_args(args.argc(), args.argv(), cfg, want_help, err));
+    EXPECT_NE(err.find("不能为空"), std::string::npos);
+  }
 }
 
 TEST(ParseArgs, SeedFlag) {

@@ -61,11 +61,34 @@ TEST(ProjectStructure, RequiredFilesExist) {
   }
 }
 
+// M1.7 前端：确认无构建流程的原生前端资源齐备。
+TEST(ProjectStructure, FrontendFilesExist) {
+  const char *files[] = {
+      "web/index.html",
+      "web/css/styles.css",
+      "web/js/main.js",
+      "web/js/api.js",
+      "web/js/auth.js",
+      "web/js/router.js",
+      "web/js/util.js",
+      "web/js/nav.js",
+      "web/js/judge.js",
+      "web/js/pages/register.js",
+      "web/js/pages/login.js",
+      "web/js/pages/password.js",
+      "web/js/pages/problems.js",
+      "web/js/pages/problem.js",
+  };
+  for (const char *f : files) {
+    EXPECT_TRUE(is_file(f)) << "缺少前端文件: " << f;
+  }
+}
+
 TEST(ProjectStructure, GitkeepPlaceholdersPresent) {
   // 尚未加入实现源码的空目录应保留 .gitkeep 占位，保证空目录可被 Git 跟踪。
   // 注意：后续里程碑在这些目录加入文件后，应同步移除对应 .gitkeep 并更新此用例。
-  const char *dirs[] = {"scripts", "data", "src/judge", "web/css",
-                        "web/js",  "web/js/pages", "web/assets"};
+  // M1.7 已为 web/css、web/js、web/js/pages 加入前端文件，故不再要求其占位文件。
+  const char *dirs[] = {"scripts", "data", "src/judge", "web/assets"};
   for (const char *d : dirs) {
     EXPECT_TRUE(is_file(std::string(d) + "/.gitkeep")) << "缺少占位文件: " << d;
   }

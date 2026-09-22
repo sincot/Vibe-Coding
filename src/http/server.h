@@ -41,10 +41,13 @@ class Database;
 // 判题工作目录等配置。正式服务无需传入二者。
 class HttpServer {
 public:
+  // web_root 为前端静态资源目录：非空且存在时以只读方式挂载到 URL 根路径
+  // 「/」（见 mount_static）。测试默认传空串，不启用静态托管，避免误暴露工作目录。
   HttpServer(std::string host, int port, Database &db, auth::JwtConfig jwt_config,
              bool enable_test_routes = false,
              judge::IExecutor *judge_executor = nullptr,
-             judge::JudgeOptions judge_options = {});
+             judge::JudgeOptions judge_options = {},
+             std::string web_root = "");
   ~HttpServer();
 
   HttpServer(const HttpServer &) = delete;
@@ -63,6 +66,11 @@ public:
 
 private:
   void setup_routes();
+  // 挂载前端静态资源。仅当 web_root_ 非空、是存在的目录且不是危险路径（项目根 /
+  // 系统根）时，才把该目录只读挂载到 URL 根路径「/」。挂载目录之外的文件（数据库、
+  // 源码、配置、判题临时目录）不会被暴露；cpp-httplib 的路径校验同时阻止「..」
+  // 越界访问。挂载失败只记录日志，不影响 /api 路由与健康检查。
+  void mount_static();
   void handle_register(const httplib::Request &req, httplib::Response &res);
   void handle_login(const httplib::Request &req, httplib::Response &res);
   void handle_me(const httplib::Request &req, httplib::Response &res);
@@ -98,6 +106,7 @@ private:
   judge::IExecutor *judge_executor_ = nullptr;
   std::unique_ptr<submit::SubmitService> submit_service_;
   bool enable_test_routes_;
+  std::string web_root_;
   httplib::Server svr_;
   std::thread listen_thread_;
   std::atomic<bool> running_{false};

@@ -76,6 +76,19 @@ bool parse_args(int argc, char **argv, Config &cfg, bool &want_help,
       continue;
     }
 
+    if (arg == "--web") {
+      if (i + 1 >= argc) {
+        error = "错误: --web 需要一个参数";
+        return false;
+      }
+      cfg.web_root = argv[++i];
+      if (cfg.web_root.empty()) {
+        error = "错误: --web 参数不能为空";
+        return false;
+      }
+      continue;
+    }
+
     if (arg == "--seed") {
       cfg.seed = true;
       continue;

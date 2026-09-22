@@ -2,6 +2,7 @@
 
 #include <sys/socket.h>
 
+#include <filesystem>
 #include <utility>
 
 #include <nlohmann/json.hpp>
@@ -223,7 +224,7 @@ json problem_detail_json(const ProblemRecord &problem,
 HttpServer::HttpServer(std::string host, int port, Database &db,
                        auth::JwtConfig jwt_config, bool enable_test_routes,
                        judge::IExecutor *judge_executor,
-                       judge::JudgeOptions judge_options)
+                       judge::JudgeOptions judge_options, std::string web_root)
     : host_(std::move(host)),
       port_(port),
       db_(db),
@@ -235,7 +236,8 @@ HttpServer::HttpServer(std::string host, int port, Database &db,
       register_service_(db, account_gen_),
       login_service_(db, jwt_),
       change_password_service_(db),
-      enable_test_routes_(enable_test_routes) {
+      enable_test_routes_(enable_test_routes),
+      web_root_(std::move(web_root)) {
   // 判题执行器：测试可注入可控实现；正式运行使用默认 LocalExecutor（仅开发环境
   // 验证，完整沙箱在 M3 提供）。
   if (judge_executor != nullptr) {
@@ -329,6 +331,34 @@ void HttpServer::setup_routes() {
       handle_test_admin_only(req, res);
     });
   }
+
+  // 静态资源最后挂载：先注册 /api 路由，确保 API 与健康检查始终优先可用。
+  mount_static();
+}
+
+void HttpServer::mount_static() {
+  if (web_root_.empty()) {
+    return;
+  }
+
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  fs::path root(web_root_);
+
+  // 防御性校验：拒绝把项目根目录 / 系统根目录作为静态根，避免整个工程被下载。
+  // 只允许挂载一个明确命名的、独立的目录（默认 web/）。
+  const fs::path normalized = root.lexically_normal();
+  if (normalized == "." || normalized == "/" || normalized.empty() ||
+      !fs::is_directory(normalized, ec)) {
+    log(LogLevel::Warn, "静态资源目录无效，已跳过静态托管: " + web_root_);
+    return;
+  }
+
+  if (!svr_.set_mount_point("/", normalized.string())) {
+    log(LogLevel::Warn, "静态资源挂载失败: " + web_root_);
+    return;
+  }
+  log(LogLevel::Info, "静态资源已挂载: " + web_root_ + " -> /");
 }
 
 void HttpServer::handle_register(const httplib::Request &req,

@@ -24,10 +24,11 @@ extern "C" void handle_signal(int sig) {
 
 void print_usage(std::ostream &os, const char *prog) {
   os << "用法: " << prog
-     << " [--host <地址>] [--port <端口>] [--db <路径>] [--seed] [--help]\n"
+     << " [--host <地址>] [--port <端口>] [--db <路径>] [--web <目录>] [--seed] [--help]\n"
      << "  --host  监听地址，默认 0.0.0.0\n"
      << "  --port  监听端口，默认 8080（范围 1-65535）\n"
      << "  --db    SQLite 数据库路径，默认 data/oj.db\n"
+     << "  --web   前端静态资源目录，默认 web（仅该目录对外可读）\n"
      << "  --seed  导入内置种子题目后退出（幂等，不覆盖已有题目，不启动服务）\n"
      << "  --help  显示本帮助\n"
      << "\n"
@@ -112,7 +113,11 @@ int main(int argc, char **argv) {
           "JWT 配置已加载（有效期 " +
               std::to_string(jwt_config.expires_seconds) + " 秒）");
 
-  oj::HttpServer server(cfg.host, cfg.port, *db, std::move(jwt_config));
+  oj::HttpServer server(cfg.host, cfg.port, *db, std::move(jwt_config),
+                        /*enable_test_routes=*/false,
+                        /*judge_executor=*/nullptr,
+                        /*judge_options=*/{},
+                        /*web_root=*/cfg.web_root);
   if (!server.start(error)) {
     oj::log(oj::LogLevel::Error, "启动失败: " + error);
     return 1;
@@ -123,6 +128,9 @@ int main(int argc, char **argv) {
   oj::log(oj::LogLevel::Info,
           "健康检查接口: http://" + cfg.host + ":" + std::to_string(cfg.port) +
               "/api/health");
+  oj::log(oj::LogLevel::Info,
+          "前端页面: http://" + cfg.host + ":" + std::to_string(cfg.port) +
+              "/（静态资源目录：" + cfg.web_root + "）");
 
   // 等待停止信号。
   while (g_signal_received == 0) {

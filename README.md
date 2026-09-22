@@ -14,8 +14,9 @@
 - [x] M1.4 最小题目数据与查询（`testcases.is_sample` 区分公开样例/隐藏用例 + 3 道幂等种子题 + `GET /api/problems` / `GET /api/problems/{id}` + 题目可见性）
 - [x] M1.5 最小判题器（`IExecutor` 抽象 + `LocalExecutor` + `JudgeEngine`：C++17/C11 编译、逐点执行、基础超时、有界输出、归一化比对与 AC/WA/CE/TLE/RE/SYSERR 汇总；仅开发环境验证，完整沙箱见 M3）
 - [x] M1.6 提交接口与持久化（`POST /api/problems/{id}/submit`：登录/首改/可见性校验 + 后端隐藏用例判题 + 单事务写入 `submissions` 与 `user_problem_status` + 同步返回逐点结果）
+- [x] M1.7 最小前端（cpp-httplib 静态托管 `web/` + 原生 HTML/CSS/ES Module + hash 路由 + 注册/登录/改密/题目列表/题目页 `textarea` 提交 + 统一 API 封装；仅开发环境验证）
 
-后续阶段（提交历史页面、排行榜、Rejudge、完整沙箱与判题线程池、前端）尚未实现。
+后续阶段（提交历史与排行榜页面、后台管理、Rejudge、完整沙箱与判题线程池、CodeMirror）尚未实现。
 
 ## 环境要求
 
@@ -122,9 +123,20 @@ ctest --test-dir build -R submit_api --output-on-failure
 ctest --test-dir build -R config_unit --output-on-failure
 ```
 
-覆盖命令行参数解析（`--host`/`--port`/`--db`/`--help`）、端口校验、默认值与组合参数、
-非法/未知参数、初始管理员密码环境变量读取，以及 JWT 配置（`OJ_JWT_SECRET` /
-`OJ_JWT_EXPIRES_SECONDS`）的读取与边界校验。
+覆盖命令行参数解析（`--host`/`--port`/`--db`/`--web`/`--help`）、端口校验、默认值与
+组合参数、非法/未知参数、初始管理员密码环境变量读取，以及 JWT 配置
+（`OJ_JWT_SECRET` / `OJ_JWT_EXPIRES_SECONDS`）的读取与边界校验。
+
+静态资源托管测试（M1.7，基于 gtest，隔离临时库 + 临时 web 目录 + 随机端口）：
+
+```bash
+ctest --test-dir build -R static_files_unit --output-on-failure
+```
+
+`static_files_unit` 覆盖：`/` → `index.html` 及 HTML/CSS/JS 的 MIME；未知静态路径
+返回 404；托管目录之外的同级文件不可访问；目录穿越（`..`、`%2e%2e`、`..%2f`、
+`.git/config`、越界系统文件）被拒绝且不回显内容；空/不存在的 `web_root` 只跳过静态
+托管并保持 `/api` 可用；静态托管不影响健康检查、题目列表与注册 POST。
 
 ## 运行
 
@@ -143,6 +155,7 @@ ctest --test-dir build -R config_unit --output-on-failure
 | `--host` | `0.0.0.0` | 监听地址 |
 | `--port` | `8080` | 监听端口（1-65535 的整数） |
 | `--db` | `data/oj.db` | SQLite 数据库路径 |
+| `--web` | `web` | 前端静态资源目录；仅该目录对外只读托管（M1.7） |
 | `--seed` | 关闭 | 仅导入内置种子题目后退出，不启动服务（幂等，详见「种子数据导入」） |
 | `OJ_ADMIN_PASSWORD` | （无） | 首次初始化（尚无 admin）时预置的管理员初始密码 |
 | `OJ_JWT_SECRET` | （无，必需） | JWT HS256 签名密钥，长度不少于 16 字节，无默认值 |
@@ -189,6 +202,66 @@ Content-Type: application/json
 
 {"status":"ok"}
 ```
+
+### 前端页面（M1.7，最小实现）
+
+服务启动后，浏览器直接访问根路径即可打开前端（默认 <http://127.0.0.1:8080/>）：
+
+```bash
+OJ_JWT_SECRET="$(openssl rand -hex 32)" OJ_ADMIN_PASSWORD='请改为强密码' \
+  ./build/oj_server --db data/oj.db
+# 浏览器打开 http://127.0.0.1:8080/
+```
+
+- **静态托管**：cpp-httplib 仅把 `--web`（默认 `web/`）目录只读挂载到 URL 根路径 `/`，并处理目录下的 `index.html`。项目根目录、`data/oj.db`、`src/`、配置文件与判题临时目录都不在托管范围内；`..` 与 URL 编码的越界路径由路径校验拦截并返回 `404`（可自行验证：`curl -i --path-as-is http://127.0.0.1:8080/SPEC.md`、`/data/oj.db`、`/../SPEC.md`、`/%2e%2e/SPEC.md` 均为 `404`）。`/api/*` 路由与 `/api/health` 行为保持不变。
+- **无构建流程**：纯原生 HTML/CSS/ES Module，无打包器、无 React/Vue 等框架。本阶段源码编辑器为 `textarea`，CodeMirror 属 M4.3。
+- **hash 路由**：`#/problems`（列表）、`#/problems/{id}`（题目页）、`#/login`、`#/register`、`#/password`。游客可浏览公开题目；`#/password` 为受保护路由，未登录时重定向到登录页并携带 `redirect` 参数，登录成功后返回原目标页。
+- **统一 API 封装**（`web/js/api.js`）：负责 JSON 序列化/解析、`Authorization: Bearer <token>`、HTTP 错误与网络异常归一化。token 保存在浏览器 `localStorage`，仅放入请求头，不进入 URL 或日志。
+- **认证行为**：身份失效（`401`）会清理本地凭证并跳转登录页（内部去重，避免并发请求重复跳转）；登录失败只显示表单错误；改密接口的「旧密码错误」按表单错误处理，不会误退出登录；后端返回 `code:"PASSWORD_CHANGE_REQUIRED"` 时引导到改密页。
+- **功能范围**：注册（成功显著展示系统分配的 10 位账号并引导用该账号登录，不依赖未实现的自动登录）、登录（保存 token 与用户状态、导航显示昵称、退出登录）、改密（沿用后端字段与密码规则，admin 首登强制引导）、题目列表（题目 ID/标题/难度/标签，含加载中、空列表、加载失败状态）、题目页（左侧题面+公开样例+难度标签+时空限制，右侧语言选择+`textarea`+提交+逐点结果）。退出登录只清理前端凭证，不声称已撤销后端 JWT。
+- **结果展示**：展示提交 ID、总体状态、逐点结果、编译信息、诊断，以及 WA 失败点的输入/期望输出/实际输出；后端未采集的内存显示为「未采集」而非真实的 `0`；不为展示结果额外获取隐藏用例。
+- **提交行为**：请求期间按钮禁用并显示「判题中」，避免重复提交；失败后保留编辑器源码、恢复可操作状态且不自动重试；网络中断时说明「结果无法确认」，不断言后端未保存提交。
+- **输出安全**：题面、样例、昵称、编译信息与程序输出一律通过 `textContent`/`<pre>` 作为纯文本渲染，HTML 特殊字符不会被解释执行。
+- **响应式**：题目页左右两栏，窗口宽度 ≤ 900px 时改为上下排列；长题面与长输出可滚动阅读。
+
+> 安全边界：本阶段仍使用 M1.5 的开发环境判题器，前端可提交不等于已具备公开运行不可信代码的能力；完整沙箱见 M3。
+
+#### M1.7 前端验证
+
+内网环境未安装可用的图形/无头浏览器，且浏览器二进制下载受限，故未使用真实
+Chrome/Firefox 渲染；页面验证由两部分完成：真实启动服务后的 HTTP 级检查，以及在
+jsdom 中真实执行 `web/js` 模块（连接同一服务）的 DOM 级验证。已验证：
+
+- HTTP 级 54 项全部通过：页面/CSS/JS 均 `200` 且 MIME 正确；`/api/health` 与现有
+  API 正常；`/SPEC.md`、`/data/oj.db`、`/src/main.cpp`、`/../SPEC.md`、`/%2e%2e/SPEC.md`
+  等静态路径均 `404`；注册/重复昵称/错误密码、公开与隐藏题可见性、C++17/C11 的
+  AC/WA/CE、admin 首改限制与改密、无效 token 等行为符合约定。
+- DOM 级 55 项全部通过：真实跑通注册（展示 10 位账号）→ 登录（保存 token、导航显示
+  昵称）→ 题目列表/详情 → C++17 与 C11 提交 AC → WA（含输入/期望/实际输出）→ CE
+  （编译信息）→ 查看结果；以及改密（错误旧密码提示、正确改密继续操作）、退出登录清
+  理凭证、token 失效跳转、游客提交受控、提交期间禁用按钮、失败保留源码且不自动重试、
+  HTML 特殊字符按文本显示、无脚本错误。
+
+**手动验证步骤**（可在有图形浏览器的机器上复现）：
+
+```bash
+# 1) 隔离启动（勿使用正式 data/oj.db）
+./build/oj_server --db /tmp/oj-web.db --seed
+OJ_JWT_SECRET="$(openssl rand -hex 32)" OJ_ADMIN_PASSWORD='请改为强密码' \
+  ./build/oj_server --db /tmp/oj-web.db --host 127.0.0.1 --port 8080
+
+# 2) 浏览器打开 http://127.0.0.1:8080/
+#    - 打开 DevTools Console/Network，确认无脚本错误与资源 404
+#    - #/register 注册，记下 10 位账号 → #/login 用该账号登录
+#    - #/problems 进入题目 → 右侧输入 C++17/C11 代码 → 提交 → 查看 AC/WA/CE 结果
+#    - 先用 admin/OJ_ADMIN_PASSWORD 登录：应进入 #/password 强制改密
+#    - 退出登录后访问 #/problems/{id}，提交按钮应禁用并提示登录
+#    - 缩小窗口至 <900px，确认题目页改为上下排列且控件可操作
+#    - 访问 /SPEC.md、/data/oj.db、/../SPEC.md 确认返回 404
+```
+
+> jsdom 仅用于本次验证、不属于项目运行依赖，未纳入仓库（保持前端无构建、无测试框架）。
+> 真实浏览器渲染、真机窄屏适配与手动点击验证为未验证项。
 
 ### 注册接口
 

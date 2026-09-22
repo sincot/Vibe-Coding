@@ -279,6 +279,17 @@ target_link_libraries(oj_http_server_test PRIVATE oj_core GTest::gtest_main)
 
 add_test(NAME http_server_unit COMMAND oj_http_server_test)
 
+# M1.7 静态资源托管单元测试（gtest）：仅挂载给定 web_root、MIME、目录穿越防护、
+# 敏感文件不可下载、空/缺失 web_root 降级，以及既有 API 不受影响（隔离临时库 +
+# 临时 web 目录 + 随机端口）。
+add_executable(oj_static_files_test
+  tests/unit/test_static_files.cpp
+)
+
+target_link_libraries(oj_static_files_test PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME static_files_unit COMMAND oj_static_files_test)
+
 # M1.5 判题核心单元测试（gtest）：输出归一化/比对、状态汇总、语言解析，以及用
 # FakeExecutor 驱动 JudgeEngine 的编排逻辑（不启动真实进程，不触碰数据库/网络）。
 add_executable(oj_judge_unit
