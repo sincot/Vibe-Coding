@@ -81,9 +81,11 @@ add_library(oj_core STATIC
   src/db/testcase_admin.cpp
   src/db/submissions.cpp
   src/db/seed.cpp
+  src/db/user_admin.cpp
   src/problem/validation.cpp
   src/problem/testcase_validation.cpp
   src/problem/list_query.cpp
+  src/user/admin_user_validation.cpp
   src/auth/password.cpp
   src/auth/account.cpp
   src/auth/validation.cpp
@@ -398,3 +400,25 @@ add_executable(oj_problem_list_api_test
 target_link_libraries(oj_problem_list_api_test PRIVATE oj_core)
 
 add_test(NAME problems_list_api COMMAND oj_problem_list_api_test)
+
+# M2.4 管理员用户接口请求参数校验单元测试（gtest）：action/user_id/new_password/
+# role 的解析与校验、未知操作与错误类型拒绝、page 分页参数边界。
+add_executable(oj_user_admin_unit
+  tests/unit/test_user_admin_unit.cpp
+)
+
+target_link_libraries(oj_user_admin_unit PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME user_admin_unit COMMAND oj_user_admin_unit)
+
+# M2.4 管理员用户接口集成测试（隔离临时库 + 随机端口真实 HTTP + 可注入执行器）：
+# 用户列表字段/排序/分页与敏感字段不泄露、权限（未登录/普通/未改密管理员）、
+# 重置密码与 old/new 登录、首改标记与实际提交限制、改角色与权限实时生效、
+# 最后管理员保护与并发、越权字段忽略、失败不部分更新、重启持久化。
+add_executable(oj_admin_users_api_test
+  tests/integration/test_admin_users_api.cpp
+)
+
+target_link_libraries(oj_admin_users_api_test PRIVATE oj_core)
+
+add_test(NAME admin_users_api COMMAND oj_admin_users_api_test)

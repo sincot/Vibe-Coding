@@ -7,6 +7,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "auth/password.h"
 #include "auth/password_change.h"
 #include "auth/validation.h"
 #include "judge/local_executor.h"
@@ -14,6 +15,7 @@
 #include "problem/list_query.h"
 #include "problem/testcase_validation.h"
 #include "problem/validation.h"
+#include "user/admin_user_validation.h"
 
 namespace oj {
 
@@ -243,6 +245,19 @@ json admin_testcase_json(const TestcaseRecord &tc, std::int64_t problem_id) {
   return j;
 }
 
+// 管理员用户列表条目 JSON：仅含管理所需字段，绝不包含 password_hash。
+// 结构体 UserSummary 本身也不含哈希，双重保证不泄露敏感字段。
+json admin_user_summary_json(const UserSummary &user) {
+  json j;
+  j["id"] = user.id;
+  j["account"] = user.account;
+  j["nickname"] = user.nickname;
+  j["role"] = user.role;
+  j["reset_pwd_flag"] = user.reset_pwd_flag;
+  j["created_at"] = user.created_at;
+  return j;
+}
+
 } // namespace
 
 HttpServer::HttpServer(std::string host, int port, Database &db,
@@ -257,6 +272,7 @@ HttpServer::HttpServer(std::string host, int port, Database &db,
       problem_store_(db),
       problem_admin_store_(db),
       testcase_admin_store_(db),
+      user_admin_store_(db),
       rate_limiter_(auth::RateLimiter::Config{}),
       account_gen_(),
       register_service_(db, account_gen_),
@@ -383,6 +399,17 @@ void HttpServer::setup_routes() {
               [this](const httplib::Request &req, httplib::Response &res) {
                 handle_admin_delete_testcase(req, res);
               });
+
+  // 管理员用户接口（M2.4）：用户列表 / 重置密码 / 改角色。统一走 require_admin
+  // （登录 + 已完成首次改密 + 当前数据库角色为 admin），角色按数据库最新值判定。
+  svr_.Get("/api/admin/users", [this](const httplib::Request &req,
+                                      httplib::Response &res) {
+    handle_admin_list_users(req, res);
+  });
+  svr_.Put("/api/admin/users", [this](const httplib::Request &req,
+                                      httplib::Response &res) {
+    handle_admin_update_user(req, res);
+  });
 
   // 测试专用路由：仅 enable_test_routes_ 为 true（集成测试）时注册，
   // 用于在正式管理员业务接口落地前验证管理员权限与首次改密限制的组合行为。
@@ -1219,6 +1246,134 @@ void HttpServer::handle_admin_delete_testcase(const httplib::Request &req,
       return;
     case TestcaseAdminStore::DeleteStatus::Error:
       log(LogLevel::Error, "删除用例失败: " + err);
+      send_error(res, 500, "内部错误");
+      return;
+  }
+}
+
+void HttpServer::handle_admin_list_users(const httplib::Request &req,
+                                         httplib::Response &res) {
+  auth::AuthUser admin;
+  if (!require_admin(req, res, admin)) {
+    return;
+  }
+
+  // 分页沿用 GET /api/problems 的既有约定（page 正整数、每页固定 20）。
+  const std::string page_text =
+      req.has_param("page") ? req.get_param_value("page") : "";
+  int page = 1;
+  std::string param_error;
+  if (!useradmin::parse_page(page_text, page, param_error)) {
+    send_error(res, 400, param_error);
+    return;
+  }
+
+  std::vector<UserSummary> users;
+  long long total = 0;
+  std::string err;
+  if (!user_admin_store_.list_users(page, useradmin::kUserPageSize, users, total,
+                                    err)) {
+    log(LogLevel::Error, "管理员用户列表查询失败: " + err);
+    send_error(res, 500, "内部错误");
+    return;
+  }
+
+  json list = json::array();
+  for (const UserSummary &user : users) {
+    list.push_back(admin_user_summary_json(user));
+  }
+  const long long total_pages =
+      total == 0 ? 0
+                 : (total + useradmin::kUserPageSize - 1) /
+                       useradmin::kUserPageSize;
+  json body;
+  body["users"] = std::move(list);
+  body["page"] = page;
+  body["page_size"] = useradmin::kUserPageSize;
+  body["total"] = total;
+  body["total_pages"] = total_pages;
+  send_json(res, 200, body);
+}
+
+void HttpServer::handle_admin_update_user(const httplib::Request &req,
+                                          httplib::Response &res) {
+  auth::AuthUser admin;
+  if (!require_admin(req, res, admin)) {
+    return;
+  }
+
+  json body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception &) {
+    send_error(res, 400, "请求体不是合法的 JSON");
+    return;
+  }
+
+  // 只读取 action / user_id / new_password / role；account、nickname、
+  // reset_pwd_flag、password_hash 等字段一律忽略，不同操作只改对应字段。
+  useradmin::Request action;
+  std::string validation_error;
+  if (!useradmin::parse_request(body, action, validation_error)) {
+    send_error(res, 400, validation_error);
+    return;
+  }
+
+  if (action.action == useradmin::Action::ResetPassword) {
+    // 新密码哈希在数据库事务外完成（argon2id 较耗时，不应长时间持有写锁）。
+    std::string new_hash;
+    std::string hash_error;
+    if (!auth::hash_password(action.new_password, new_hash, hash_error)) {
+      log(LogLevel::Error, "管理员重置密码：哈希失败: " + hash_error);
+      send_error(res, 500, "内部错误");
+      return;
+    }
+
+    std::string err;
+    switch (user_admin_store_.reset_password(action.user_id, new_hash, err)) {
+      case UserAdminStore::ResetStatus::Updated: {
+        // 日志只记录操作者、目标与结果，不记录密码/哈希。
+        log(LogLevel::Info, "管理员 " + std::to_string(admin.id) +
+                                " 重置用户 " + std::to_string(action.user_id) +
+                                " 的密码：成功");
+        json resp;
+        resp["user_id"] = action.user_id;
+        resp["status"] = "ok";
+        send_json(res, 200, resp);
+        return;
+      }
+      case UserAdminStore::ResetStatus::NotFound:
+        send_error(res, 404, "用户不存在");
+        return;
+      case UserAdminStore::ResetStatus::Error:
+        log(LogLevel::Error, "管理员重置密码失败: " + err);
+        send_error(res, 500, "内部错误");
+        return;
+    }
+  }
+
+  // ChangeRole
+  std::string err;
+  switch (user_admin_store_.change_role(action.user_id, action.role, err)) {
+    case UserAdminStore::RoleStatus::Updated: {
+      log(LogLevel::Info, "管理员 " + std::to_string(admin.id) + " 将用户 " +
+                              std::to_string(action.user_id) + " 角色改为 " +
+                              action.role + "：成功");
+      json resp;
+      resp["user_id"] = action.user_id;
+      resp["role"] = action.role;
+      resp["status"] = "ok";
+      send_json(res, 200, resp);
+      return;
+    }
+    case UserAdminStore::RoleStatus::NotFound:
+      send_error(res, 404, "用户不存在");
+      return;
+    case UserAdminStore::RoleStatus::LastAdmin:
+      send_error(res, 409, "不能取消最后一个管理员的权限");
+      return;
+    case UserAdminStore::RoleStatus::Error:
+      log(LogLevel::Error, "管理员修改角色失败: " + err);
       send_error(res, 500, "内部错误");
       return;
   }

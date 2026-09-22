@@ -18,8 +18,9 @@
 - [x] M2.1 管理员题目接口（`POST`/`PUT`/`DELETE /api/admin/problems`：字段校验与默认值 + 部分更新语义 + 可见性设置 + 删除关联数据规则 + 统一管理员权限检查）
 - [x] M2.2 管理员测试用例接口（`GET`/`POST`/`PUT`/`DELETE /api/admin/problems/{id}/testcases[/{tid}]`：隐藏用例读/增/改/删 + 归属与权限校验 + `ord` 排序规则 + 公开样例隔离 + 判题快照与历史数据不受影响）
 - [x] M2.3 题目列表查询（`GET /api/problems` 支持 `q`/`difficulty`/`tag`/`page`/`visible`：关键词搜索 + 难度/标签精确筛选 + AND 组合 + 每页 20 条分页 + 通过人数与本人状态 + 可见范围）
+- [x] M2.4 管理员用户接口（`GET`/`PUT /api/admin/users`：用户列表分页查询 + 重置密码 + 修改角色 + 最后管理员保护 + 统一管理员权限检查）
 
-后续阶段（用户管理、后台页面、Rejudge、完整沙箱与判题线程池、CodeMirror、完整搜索筛选分页页面）尚未实现。
+后续阶段（后台页面、Rejudge、完整沙箱与判题线程池、CodeMirror、完整搜索筛选分页页面）尚未实现。
 
 ## 环境要求
 
@@ -151,6 +152,25 @@ ctest --test-dir build -R problems_list_api --output-on-failure
 （重复 AC 不增加、仅失败不计入）、本人 `solved` 状态、游客不返回该字段、客户端不能
 指定他人身份、游客/普通/已改密管理员/未改密管理员可见范围、管理员 `visible` 筛选、
 列表不含隐藏用例与用户源码、非法参数 400、无效 token 401、数据库故障 500。
+
+管理员用户接口测试（M2.4，单元 + 集成，隔离临时库 + 随机端口 + 可注入执行器）：
+
+```bash
+ctest --test-dir build -R user_admin_unit --output-on-failure
+ctest --test-dir build -R admin_users_api --output-on-failure
+```
+
+`user_admin_unit` 覆盖请求参数纯函数：`action`（`reset_password`/`change_role`）、正整数
+`user_id`、`new_password` 密码规则复用且不裁剪、`role` 枚举，以及未知操作/缺失字段/
+错误类型/超长数字与 `page` 分页边界。`admin_users_api` 通过真实 HTTP 覆盖：用户列表
+字段完整、按 `id` 升序稳定排序、分页与非法分页参数、响应不含密码哈希等敏感信息；未登录
+`401`、普通用户 `403`、未完成首改管理员 `403 PASSWORD_CHANGE_REQUIRED` 且数据库不变；
+重置密码后旧密码失效、新密码可登录、库内保存有效 argon2id 哈希并置 `reset_pwd_flag=1`、
+普通用户提交被拦截且改密后恢复、旧 token 仍有效但权限按数据库最新值；提升后新角色立即
+生效、降级后原 token 失去管理员权限；非法请求与不存在用户被拒且原数据不变、夹带
+`account`/`nickname`/`role` 等字段不能越权；自我降级、最后管理员 `409` 与并发互降始终
+保留一名管理员；修改密码/角色不改变账号、历史提交与做题状态；数据库故障 `500` 不泄露；
+重启后密码与角色保留。
 
 配置管理单元测试（基于 gtest，无外部依赖，不触碰数据库与网络）：
 
@@ -772,6 +792,114 @@ curl -i -X DELETE http://127.0.0.1:8080/api/admin/problems/4/testcases/11 \
 - 管理员可暂时删空某题用例以便编辑；空测试集**不判 AC**，提交时返回约定的 `SYSERR`
   （不可判题）并正常持久化为提交记录。删题规则仍沿用 M2.1（有提交记录时拒绝删除）。
 
+### 管理员用户接口（M2.4）
+
+两个接口均需管理员权限（已登录 + 已完成首次改密 + 当前数据库角色为 `admin`），角色与
+首次改密标记每次按 `sub` 回查数据库。游客/无效 token 返回 `401`；普通用户返回 `403`；
+未完成首次改密的管理员返回 `403` + `code:"PASSWORD_CHANGE_REQUIRED"`；数据库故障返回
+`500`。请求体只读取下列明确列出的字段，其余字段（`account`/`nickname`/`password_hash`/
+`reset_pwd_flag` 等）一律忽略，不同操作只修改对应字段，绝不把请求体任意映射到 `users` 表。
+
+**用户列表**：`GET /api/admin/users`。分页沿用 `GET /api/problems` 的既有约定：`page`
+默认 `1`，仅接受正整数 `1..1000000`（`0`、负数、非整数、超上限返回 `400`），每页固定
+`20` 条；超出末页返回 `200` 空列表。排序为 `id ASC`（主键，跨页不重不漏）。响应只返回
+管理所需字段，**不含 `password_hash` 等任何敏感字段**。
+
+```bash
+curl -i 'http://127.0.0.1:8080/api/admin/users?page=1' \
+  -H 'Authorization: Bearer <admin-token>'
+```
+
+成功响应（`200`）：
+
+```
+{"page":1,"page_size":20,"total":23,"total_pages":2,
+ "users":[
+   {"id":1,"account":"admin","nickname":"admin","role":"admin","reset_pwd_flag":0,"created_at":"2026-09-22 08:00:00"},
+   {"id":2,"account":"0123456789","nickname":"alice","role":"user","reset_pwd_flag":0,"created_at":"2026-09-22 08:05:11"}
+ ]}
+```
+
+**重置密码 / 修改角色**：`PUT /api/admin/users`。请求体为 JSON，必须包含：
+`action`（字符串，严格取值 `reset_password` 或 `change_role`）和 `user_id`（目标用户 ID，
+正整数）。不同 `action` 读取的字段不同，**只允许修改对应字段**：
+
+- `reset_password`：必填 `new_password`（字符串，复用注册密码规则：非空、≤128 字符、
+  不裁剪不截断）。**不需要也不读取目标用户的旧密码**。
+- `change_role`：必填 `role`（字符串，严格取值 `admin` 或 `user`）。
+
+```bash
+# 重置用户 2 的密码
+curl -i -X PUT http://127.0.0.1:8080/api/admin/users \
+  -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \
+  -d '{"action":"reset_password","user_id":2,"new_password":"NewSecret1"}'
+
+# 将用户 2 的角色改为 admin
+curl -i -X PUT http://127.0.0.1:8080/api/admin/users \
+  -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \
+  -d '{"action":"change_role","user_id":2,"role":"admin"}'
+```
+
+成功响应（`200`，只返回必要确认信息，不回显密码）：
+
+```
+{"user_id":2,"status":"ok"}
+{"user_id":2,"role":"admin","status":"ok"}
+```
+
+字段规则：
+
+| 字段 | 类型 | 必填 | 规则 |
+|---|---|---|---|
+| `action` | string | 是 | 严格取值 `reset_password` / `change_role`，其它值 `400` |
+| `user_id` | integer | 是 | 正整数；`0`/负数/小数/字符串/布尔/null 及超大值均 `400` |
+| `new_password` | string | `reset_password` 时必填 | 非空、≤128 字符；不裁剪、不截断；空白视为有效内容 |
+| `role` | string | `change_role` 时必填 | 严格取值 `admin` / `user`，其它值 `400` |
+
+**重置后的首次改密策略（本次确定）**：管理员重置密码时，目标用户的 `reset_pwd_flag`
+置为 `1`（与密码哈希在同一条 `UPDATE` 内原子生效）。该标记**对所有目标用户生效**
+（含普通用户），复用 M1.3 的既有强制检查：
+
+- 普通用户标记为 `1` 时，`POST /api/problems/{id}/submit` 返回 `403` +
+  `code:"PASSWORD_CHANGE_REQUIRED"`；管理员标记为 `1` 时，所有管理员接口返回同样的
+  `403`。登录、`GET /api/me`、`POST /api/me/password` 不受限制。
+- 目标用户通过 `POST /api/me/password` 修改本人密码后，标记清除，受限业务恢复。
+- 这说明本阶段把 M1.3 的强制改密适用范围从「管理员业务入口」扩展到「普通用户的提交
+  业务」；后端确有对应限制，不只是设置标记。
+
+**角色保护规则（本次确定）**：
+
+- 仅允许现有角色枚举 `admin` 与 `user`。
+- **禁止取消最后一个管理员的权限**：把当前唯一的管理员降级为 `user` 返回 `409`
+  （`{"error":"不能取消最后一个管理员的权限"}`）。该检查与角色更新在同一个
+  `BEGIN IMMEDIATE` 事务内完成并复用连接级事务互斥锁，**并发降级不会把管理员清零**。
+- **允许管理员取消自己的权限**（自我降级），只要不是最后一名管理员；**预置 `admin`
+  没有额外豁免**，其角色同样可被修改。降级后其原有 token 在下一次请求时即按数据库
+  最新角色判定为普通用户，不能再调用管理员接口。
+- 角色修改不改变账号、昵称、密码哈希、历史提交记录与 `user_problem_status`（AC 状态、
+  首次 AC 时间、提交次数）。
+
+**JWT 行为（沿用现有会话策略）**：本阶段**没有**会话撤销机制。管理员重置密码或修改
+角色后，已签发的旧 token 仍然有效至其 `exp` 过期，**不声称「改了密码哈希旧 token 就
+失效」**。由于每次鉴权都按 `sub` 回查数据库，旧 token 的**权限与首次改密标记始终按数据库
+最新值实时生效**：被降级的用户即使持有旧 token 也无法访问管理员接口；被重置密码的用户
+的提交/管理员访问会因 `reset_pwd_flag=1` 被拦截。
+
+错误约定：
+
+| 状态码 | 含义 |
+|---|---|
+| `200` | 查询、重置、改角色成功 |
+| `400` | 非法参数：非法 JSON、未知 `action`、缺少字段、类型错误、`user_id` 非正整数、非法/过长 `new_password`、非法 `role`、非法 `page` |
+| `401` | 未登录 / 无效 token |
+| `403` | 非管理员；或管理员未完成首次改密（含 `code:"PASSWORD_CHANGE_REQUIRED"`） |
+| `404` | 目标用户不存在 |
+| `409` | 管理员保护冲突：不能取消最后一个管理员的权限 |
+| `500` | 内部故障（不泄露 SQL/路径/哈希/密码） |
+
+> 运行日志记录操作者 ID、目标用户 ID、操作类型与结果，**不记录密码、哈希或完整 token**；
+> 目标用户不存在、请求非法或写入失败时不产生部分更新。
+
 ### 提交接口（M1.6）
 
 `POST /api/problems/{id}/submit`（需登录），同步判题并返回本次提交的结果。请求体为
@@ -919,8 +1047,8 @@ result.status;                              // AC/WA/CE/TLE/RE/MLE/SYSERR
 | `400` | 非法输入：JSON 解析失败、字段缺失/类型错误、非法昵称/密码/账号/密码为空、非法新密码、新密码与旧密码相同、非法题目 ID、不支持的语言、空/纯空白/超长源码 |
 | `401` | 登录失败（账号或密码错误）/ 认证无效（缺失、损坏、伪造、篡改、过期、无签名、算法不匹配或引用不存在用户等 token）/ 旧密码错误 |
 | `403` | 权限不足（非管理员访问管理员功能）/ 必须先改密（含 `code:"PASSWORD_CHANGE_REQUIRED"`） |
-| `404` | 题目不存在，或当前用户无权查看/提交的隐藏题目（统一返回，不区分） |
-| `409` | 昵称已被使用（含并发冲突） |
+| `404` | 题目不存在，或当前用户无权查看/提交的隐藏题目（统一返回，不区分）；管理员用户接口的目标用户不存在 |
+| `409` | 昵称已被使用（含并发冲突）/ 不能取消最后一个管理员的权限 |
 | `413` | 请求体超过服务器上限（1 MiB，在解析前拒绝） |
 | `429` | 登录尝试过于频繁（触发限速） |
 | `500` | 内部故障（含提交持久化失败，不声称已保存，不泄露 SQL/路径） |
