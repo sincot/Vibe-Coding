@@ -83,6 +83,7 @@ add_library(oj_core STATIC
   src/db/seed.cpp
   src/problem/validation.cpp
   src/problem/testcase_validation.cpp
+  src/problem/list_query.cpp
   src/auth/password.cpp
   src/auth/account.cpp
   src/auth/validation.cpp
@@ -376,3 +377,24 @@ add_executable(oj_admin_testcases_api_test
 target_link_libraries(oj_admin_testcases_api_test PRIVATE oj_core)
 
 add_test(NAME admin_testcases_api COMMAND oj_admin_testcases_api_test)
+
+# M2.3 题目列表查询参数解析单元测试（gtest）：空白裁剪、LIKE 转义、标题/标签
+# 匹配模式、难度取值、q/difficulty/tag/page/visible 归一化与非法值拒绝。
+add_executable(oj_problem_list_query_unit
+  tests/unit/test_problem_list_query.cpp
+)
+
+target_link_libraries(oj_problem_list_query_unit PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME problem_list_query_unit COMMAND oj_problem_list_query_unit)
+
+# M2.3 题目列表查询集成测试（隔离临时库 + 随机端口真实 HTTP + 可注入执行器）：
+# 搜索/难度/标签筛选、组合 AND、分页稳定性与边界、total 可见性、通过人数口径、
+# 本人状态、游客/普通/管理员可见范围、管理员 visible 筛选、不泄露隐藏内容。
+add_executable(oj_problem_list_api_test
+  tests/integration/test_problem_list_query.cpp
+)
+
+target_link_libraries(oj_problem_list_api_test PRIVATE oj_core)
+
+add_test(NAME problems_list_api COMMAND oj_problem_list_api_test)

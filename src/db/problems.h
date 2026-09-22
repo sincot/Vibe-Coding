@@ -15,6 +15,37 @@ struct ProblemSummary {
   std::string difficulty;
   std::vector<std::string> tags;
   bool visible = true;
+  // 通过人数：已 AC 的不同用户数（同一用户重复 AC 只计一人）。
+  long long pass_count = 0;
+  // 本人对该题是否已 AC；仅当查询携带了已登录用户 ID 时有意义（游客为 false）。
+  bool solved = false;
+};
+
+// 列表可见性筛选（M2.3）。调用方须先完成身份判定：非管理员只能使用
+// VisibleOnly，不得因筛选参数而看到隐藏题目。
+enum class ProblemVisibility {
+  VisibleOnly, // 仅 visible=1
+  All,         // 全部（含隐藏），仅管理员可用
+  HiddenOnly,  // 仅 visible=0，仅管理员可用
+};
+
+// 列表查询条件。keyword/difficulty/tag 已由 problem::parse_list_query
+// 归一化（去空白、空表示不限）；viewer_user_id 为 0 表示游客（不返回本人状态），
+// 正数表示当前登录用户（来自已验证的身份上下文，不接受客户端指定）。
+struct ProblemListQuery {
+  ProblemVisibility visibility = ProblemVisibility::VisibleOnly;
+  std::string keyword;
+  std::string difficulty;
+  std::string tag;
+  std::int64_t viewer_user_id = 0;
+  int page = 1;
+  int page_size = 20;
+};
+
+// 列表查询结果：当前页数据与满足相同筛选/可见性条件的总数。
+struct ProblemListResult {
+  std::vector<ProblemSummary> items;
+  long long total = 0;
 };
 
 // 题目详情元数据：不含任何测试用例（公开样例与隐藏用例都需另行读取），
@@ -62,6 +93,13 @@ public:
   // 返回 false 表示数据库错误，error 非空。
   bool list(bool include_hidden, std::vector<ProblemSummary> &out,
             std::string &error);
+
+  // 带搜索/难度/标签筛选与分页的列表查询（M2.3），按 id 升序稳定排序。
+  // 列表与 total 使用完全相同的筛选与可见性条件，total 不会泄露隐藏题目。
+  // 每页大小由 query.page_size 指定（接口固定为 20）。超出末页返回空列表且
+  // total 仍为筛选后的总数。返回 false 表示数据库错误。
+  bool query(const ProblemListQuery &query, ProblemListResult &out,
+             std::string &error);
 
   // 按 ID 查询题目元数据（不区分可见性；可见性由调用方结合当前身份判断）。
   // 返回 true 表示查询过程正常，found 指示是否存在；返回 false 表示数据库错误。

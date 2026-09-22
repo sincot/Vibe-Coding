@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <thread>
@@ -26,6 +27,16 @@
 namespace oj {
 
 class Database;
+
+// 题目接口的访问者身份（游客 / 普通用户 / 管理员）。
+// authenticated 表示携带了可验证的 token；is_admin 表示通过管理员检查
+// （已登录 + 已完成首次改密 + 当前数据库角色为 admin）。user_id 来自已验证的
+// 当前用户上下文，绝不来自客户端参数。
+struct ProblemViewer {
+  bool authenticated = false;
+  bool is_admin = false;
+  std::int64_t user_id = 0;
+};
 
 // HTTP 服务封装：注册路由、启动监听、优雅停止。
 //
@@ -107,10 +118,9 @@ private:
                      auth::AuthUser &user);
 
   // 解析可选的访问者身份：未携带 Authorization 头时视为游客；携带时复用已有
-  // 身份验证。认证失败已写入响应并返回 false；成功时 is_admin 表示是否通过
-  // 管理员检查（已登录 + 已完成首次改密 + admin 角色），用于题目可见性判断。
+  // 身份验证。认证失败已写入响应并返回 false；成功时填充 viewer。
   bool resolve_viewer(const httplib::Request &req, httplib::Response &res,
-                      bool &is_admin);
+                      ProblemViewer &viewer);
 
   std::string host_;
   int port_;

@@ -11,6 +11,7 @@
 #include "auth/validation.h"
 #include "judge/local_executor.h"
 #include "log.h"
+#include "problem/list_query.h"
 #include "problem/testcase_validation.h"
 #include "problem/validation.h"
 
@@ -188,13 +189,20 @@ bool parse_problem_id(const std::string &text, std::int64_t &out) {
 }
 
 // 列表条目 JSON：只含列表展示所需字段，不含题面与任何测试用例。
-json problem_summary_json(const ProblemSummary &problem) {
+// viewer_authenticated 为 true 时附带本人对该题的 AC 状态（solved）；
+// 游客不附带该字段，避免把「本人状态」伪装给未登录访问者。
+json problem_summary_json(const ProblemSummary &problem,
+                          bool viewer_authenticated) {
   json j;
   j["id"] = problem.id;
   j["title"] = problem.title;
   j["difficulty"] = problem.difficulty;
   j["tags"] = problem.tags;
   j["visible"] = problem.visible;
+  j["pass_count"] = problem.pass_count;
+  if (viewer_authenticated) {
+    j["solved"] = problem.solved;
+  }
   return j;
 }
 
@@ -591,8 +599,9 @@ void HttpServer::handle_change_password(const httplib::Request &req,
 }
 
 bool HttpServer::resolve_viewer(const httplib::Request &req,
-                                httplib::Response &res, bool &is_admin) {
-  is_admin = false;
+                                httplib::Response &res,
+                                ProblemViewer &viewer) {
+  viewer = ProblemViewer{};
   const std::string authorization = req.get_header_value("Authorization");
   if (authorization.empty()) {
     return true; // 游客
@@ -618,8 +627,10 @@ bool HttpServer::resolve_viewer(const httplib::Request &req,
       return false;
   }
 
+  viewer.authenticated = true;
+  viewer.user_id = user.id;
   // 只有通过 M1.3 管理员检查（已登录 + 已完成首次改密 + admin 角色）才可查看隐藏题。
-  is_admin = auth::check_admin(user) == auth::AdminCheck::Ok;
+  viewer.is_admin = auth::check_admin(user) == auth::AdminCheck::Ok;
   return true;
 }
 
@@ -650,26 +661,78 @@ bool HttpServer::require_admin(const httplib::Request &req,
 
 void HttpServer::handle_problem_list(const httplib::Request &req,
                                      httplib::Response &res) {
-  bool is_admin = false;
-  if (!resolve_viewer(req, res, is_admin)) {
+  ProblemViewer viewer;
+  if (!resolve_viewer(req, res, viewer)) {
     return;
   }
 
-  std::vector<ProblemSummary> problems;
+  // 解析并校验查询参数。空参数表示不限；非法参数按项目约定返回 400。
+  problem::RawListParams raw;
+  raw.q = req.has_param("q") ? req.get_param_value("q") : "";
+  raw.difficulty = req.has_param("difficulty")
+                       ? req.get_param_value("difficulty")
+                       : "";
+  raw.tag = req.has_param("tag") ? req.get_param_value("tag") : "";
+  raw.page = req.has_param("page") ? req.get_param_value("page") : "";
+  raw.visible =
+      req.has_param("visible") ? req.get_param_value("visible") : "";
+
+  problem::ListFilter filter;
+  std::string param_error;
+  if (!problem::parse_list_query(raw, filter, param_error)) {
+    send_error(res, 400, param_error);
+    return;
+  }
+
+  ProblemListQuery query;
+  query.keyword = filter.keyword;
+  query.difficulty = filter.difficulty;
+  query.tag = filter.tag;
+  query.page = filter.page;
+  query.page_size = filter.page_size;
+  // 本人状态只取自已验证的当前用户上下文；游客传 0（不匹配任何用户记录）。
+  query.viewer_user_id = viewer.authenticated ? viewer.user_id : 0;
+
+  // 可见性：非管理员始终只能看可见题目，即使显式传入 visible=0 也不得扩大范围；
+  // 管理员可按 visible 参数筛选「全部 / 公开 / 隐藏」。
+  if (!viewer.is_admin) {
+    query.visibility = ProblemVisibility::VisibleOnly;
+  } else {
+    switch (filter.visible) {
+      case problem::VisibleFilter::OnlyVisible:
+        query.visibility = ProblemVisibility::VisibleOnly;
+        break;
+      case problem::VisibleFilter::OnlyHidden:
+        query.visibility = ProblemVisibility::HiddenOnly;
+        break;
+      case problem::VisibleFilter::All:
+        query.visibility = ProblemVisibility::All;
+        break;
+    }
+  }
+
+  ProblemListResult result;
   std::string err;
-  if (!problem_store_.list(is_admin, problems, err)) {
+  if (!problem_store_.query(query, result, err)) {
     log(LogLevel::Error, "题目列表查询失败: " + err);
     send_error(res, 500, "内部错误");
     return;
   }
 
   json list = json::array();
-  for (const ProblemSummary &problem : problems) {
-    list.push_back(problem_summary_json(problem));
+  for (const ProblemSummary &problem : result.items) {
+    list.push_back(problem_summary_json(problem, viewer.authenticated));
   }
+  const long long total_pages =
+      result.total == 0
+          ? 0
+          : (result.total + filter.page_size - 1) / filter.page_size;
   json body;
   body["problems"] = std::move(list);
-  body["total"] = problems.size();
+  body["page"] = filter.page;
+  body["page_size"] = filter.page_size;
+  body["total"] = result.total;
+  body["total_pages"] = total_pages;
   send_json(res, 200, body);
 }
 
@@ -681,8 +744,8 @@ void HttpServer::handle_problem_detail(const httplib::Request &req,
     return;
   }
 
-  bool is_admin = false;
-  if (!resolve_viewer(req, res, is_admin)) {
+  ProblemViewer viewer;
+  if (!resolve_viewer(req, res, viewer)) {
     return;
   }
 
@@ -696,7 +759,7 @@ void HttpServer::handle_problem_detail(const httplib::Request &req,
   }
   // 不存在的题目与当前用户无权查看的隐藏题目统一返回 404，避免通过状态码差异
   // 探测隐藏题目是否存在，也避免通过直接请求 ID 绕过可见性限制。
-  if (!found || (!problem.visible && !is_admin)) {
+  if (!found || (!problem.visible && !viewer.is_admin)) {
     send_error(res, 404, "题目不存在");
     return;
   }
