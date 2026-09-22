@@ -11,6 +11,7 @@
 #include "auth/validation.h"
 #include "judge/local_executor.h"
 #include "log.h"
+#include "problem/validation.h"
 
 namespace oj {
 
@@ -231,6 +232,7 @@ HttpServer::HttpServer(std::string host, int port, Database &db,
       jwt_(std::move(jwt_config.secret), jwt_config.expires_seconds),
       user_store_(db),
       problem_store_(db),
+      problem_admin_store_(db),
       rate_limiter_(auth::RateLimiter::Config{}),
       account_gen_(),
       register_service_(db, account_gen_),
@@ -321,6 +323,22 @@ void HttpServer::setup_routes() {
             [this](const httplib::Request &req, httplib::Response &res) {
               handle_submit(req, res);
             });
+
+  // 管理员题目管理接口（M2.1）：建题 / 改题 / 删题。三者统一走
+  // require_admin（登录 + 已完成首次改密 + 当前数据库角色为 admin）。
+  // 隐藏用例的增删改属 M2.2，不在这些接口范围内。
+  svr_.Post("/api/admin/problems", [this](const httplib::Request &req,
+                                          httplib::Response &res) {
+    handle_admin_create_problem(req, res);
+  });
+  svr_.Put(R"(/api/admin/problems/([^/]+))",
+           [this](const httplib::Request &req, httplib::Response &res) {
+             handle_admin_update_problem(req, res);
+           });
+  svr_.Delete(R"(/api/admin/problems/([^/]+))",
+              [this](const httplib::Request &req, httplib::Response &res) {
+                handle_admin_delete_problem(req, res);
+              });
 
   // 测试专用路由：仅 enable_test_routes_ 为 true（集成测试）时注册，
   // 用于在正式管理员业务接口落地前验证管理员权限与首次改密限制的组合行为。
@@ -569,6 +587,31 @@ bool HttpServer::resolve_viewer(const httplib::Request &req,
   return true;
 }
 
+bool HttpServer::require_admin(const httplib::Request &req,
+                               httplib::Response &res, auth::AuthUser &user) {
+  std::string token;
+  if (!auth::extract_bearer_token(req.get_header_value("Authorization"), token)) {
+    send_error(res, 401, "未提供有效的认证信息");
+    return false;
+  }
+
+  std::string err;
+  switch (auth::authenticate_request(jwt_, user_store_, token, user, err)) {
+    case auth::AuthResult::Ok:
+      break;
+    case auth::AuthResult::Unauthorized:
+      send_error(res, 401, "认证失败");
+      return false;
+    case auth::AuthResult::InternalError:
+      send_error(res, 500, "内部错误");
+      return false;
+  }
+
+  // 角色与首次改密标记均取自数据库最新值（authenticate_request 已回查），
+  // 不信任客户端提交的角色字段，也不依赖 JWT 中可能过时的角色。
+  return enforce_admin(user, res);
+}
+
 void HttpServer::handle_problem_list(const httplib::Request &req,
                                      httplib::Response &res) {
   bool is_admin = false;
@@ -753,6 +796,130 @@ void HttpServer::handle_submit(const httplib::Request &req,
     return;
   }
   send_json(res, 200, body);
+}
+
+void HttpServer::handle_admin_create_problem(const httplib::Request &req,
+                                             httplib::Response &res) {
+  auth::AuthUser admin;
+  if (!require_admin(req, res, admin)) {
+    return;
+  }
+
+  json body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception &) {
+    send_error(res, 400, "请求体不是合法的 JSON");
+    return;
+  }
+
+  // 只读取题目可写字段；id/created_at/updated_at/seed_key 等由服务端管理，
+  // 客户端传入一律忽略。
+  problem::ProblemData data;
+  std::string validation_error;
+  if (!problem::parse_create_problem(body, data, validation_error)) {
+    send_error(res, 400, validation_error);
+    return;
+  }
+
+  std::int64_t new_id = 0;
+  std::string err;
+  if (!problem_admin_store_.create(data, new_id, err)) {
+    log(LogLevel::Error, "创建题目失败: " + err);
+    send_error(res, 500, "内部错误");
+    return;
+  }
+
+  log(LogLevel::Info, "管理员 " + std::to_string(admin.id) + " 创建题目 #" +
+                          std::to_string(new_id));
+  json resp;
+  resp["id"] = new_id;
+  send_json(res, 201, resp);
+}
+
+void HttpServer::handle_admin_update_problem(const httplib::Request &req,
+                                             httplib::Response &res) {
+  auth::AuthUser admin;
+  if (!require_admin(req, res, admin)) {
+    return;
+  }
+
+  std::int64_t id = 0;
+  if (req.matches.size() < 2 || !parse_problem_id(req.matches[1].str(), id)) {
+    send_error(res, 400, "非法题目 ID");
+    return;
+  }
+
+  json body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception &) {
+    send_error(res, 400, "请求体不是合法的 JSON");
+    return;
+  }
+
+  // 部分更新语义：仅更新请求体中出现的字段，未出现的字段保持原值，
+  // 避免遗漏字段被意外清空。
+  problem::ProblemPatch patch;
+  std::string validation_error;
+  if (!problem::parse_update_problem(body, patch, validation_error)) {
+    send_error(res, 400, validation_error);
+    return;
+  }
+
+  std::string err;
+  switch (problem_admin_store_.update(id, patch, err)) {
+    case ProblemAdminStore::UpdateStatus::Updated: {
+      json resp;
+      resp["id"] = id;
+      resp["status"] = "ok";
+      send_json(res, 200, resp);
+      return;
+    }
+    case ProblemAdminStore::UpdateStatus::NotFound:
+      send_error(res, 404, "题目不存在");
+      return;
+    case ProblemAdminStore::UpdateStatus::Error:
+      log(LogLevel::Error, "修改题目失败: " + err);
+      send_error(res, 500, "内部错误");
+      return;
+  }
+}
+
+void HttpServer::handle_admin_delete_problem(const httplib::Request &req,
+                                             httplib::Response &res) {
+  auth::AuthUser admin;
+  if (!require_admin(req, res, admin)) {
+    return;
+  }
+
+  std::int64_t id = 0;
+  if (req.matches.size() < 2 || !parse_problem_id(req.matches[1].str(), id)) {
+    send_error(res, 400, "非法题目 ID");
+    return;
+  }
+
+  std::string err;
+  switch (problem_admin_store_.remove(id, err)) {
+    case ProblemAdminStore::DeleteStatus::Deleted: {
+      log(LogLevel::Info, "管理员 " + std::to_string(admin.id) + " 删除题目 #" +
+                              std::to_string(id));
+      json resp;
+      resp["status"] = "ok";
+      send_json(res, 200, resp);
+      return;
+    }
+    case ProblemAdminStore::DeleteStatus::NotFound:
+      send_error(res, 404, "题目不存在");
+      return;
+    case ProblemAdminStore::DeleteStatus::HasSubmissions:
+      send_error(res, 409, "题目已有提交记录，无法删除");
+      return;
+    case ProblemAdminStore::DeleteStatus::Error:
+      log(LogLevel::Error, "删除题目失败: " + err);
+      send_error(res, 500, "内部错误");
+      return;
+  }
 }
 
 void HttpServer::handle_test_admin_only(const httplib::Request &req,

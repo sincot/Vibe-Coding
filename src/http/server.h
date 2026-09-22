@@ -15,6 +15,7 @@
 #include "auth/password_change.h"
 #include "auth/rate_limit.h"
 #include "auth/register.h"
+#include "db/problem_admin.h"
 #include "db/problems.h"
 #include "db/users.h"
 #include "judge/executor.h"
@@ -81,8 +82,20 @@ private:
   void handle_problem_detail(const httplib::Request &req,
                              httplib::Response &res);
   void handle_submit(const httplib::Request &req, httplib::Response &res);
+  void handle_admin_create_problem(const httplib::Request &req,
+                                   httplib::Response &res);
+  void handle_admin_update_problem(const httplib::Request &req,
+                                   httplib::Response &res);
+  void handle_admin_delete_problem(const httplib::Request &req,
+                                   httplib::Response &res);
   void handle_test_admin_only(const httplib::Request &req,
                               httplib::Response &res);
+
+  // 管理员业务入口的登录检查：解析 Bearer token 并验证身份，成功时填充 user；
+  // 之后再执行 enforce_admin（已登录 + 已完成首次改密 + admin 角色）。任一失败
+  // 时已写入响应并返回 false，调用方直接返回。所有管理员接口统一复用本方法。
+  bool require_admin(const httplib::Request &req, httplib::Response &res,
+                     auth::AuthUser &user);
 
   // 解析可选的访问者身份：未携带 Authorization 头时视为游客；携带时复用已有
   // 身份验证。认证失败已写入响应并返回 false；成功时 is_admin 表示是否通过
@@ -96,6 +109,7 @@ private:
   auth::JwtService jwt_;
   UserStore user_store_;
   ProblemStore problem_store_;
+  ProblemAdminStore problem_admin_store_;
   auth::RateLimiter rate_limiter_;
   auth::RandomAccountGenerator account_gen_;
   auth::RegisterService register_service_;

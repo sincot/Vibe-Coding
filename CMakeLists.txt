@@ -77,8 +77,10 @@ add_library(oj_core STATIC
   src/db/schema.cpp
   src/db/users.cpp
   src/db/problems.cpp
+  src/db/problem_admin.cpp
   src/db/submissions.cpp
   src/db/seed.cpp
+  src/problem/validation.cpp
   src/auth/password.cpp
   src/auth/account.cpp
   src/auth/validation.cpp
@@ -330,3 +332,24 @@ add_executable(oj_submit_api_test
 target_link_libraries(oj_submit_api_test PRIVATE oj_core)
 
 add_test(NAME submit_api COMMAND oj_submit_api_test)
+
+# M2.1 管理员题目写入字段校验单元测试（gtest）：创建/部分更新的字段校验与规范
+# 化（必填、类型、长度、难度枚举、标签结构、数值范围与默认值）。
+add_executable(oj_problem_admin_unit
+  tests/unit/test_problem_admin_unit.cpp
+)
+
+target_link_libraries(oj_problem_admin_unit PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME problem_admin_unit COMMAND oj_problem_admin_unit)
+
+# M2.1 管理员题目接口集成测试（隔离临时库 + 随机端口真实 HTTP + 可注入执行器）：
+# 建题/改题/删题的权限、字段校验、可见性、默认值与部分更新语义、删除关联数据
+# 规则、并发删除与提交一致性、重启持久化。
+add_executable(oj_admin_problems_api_test
+  tests/integration/test_admin_problems_api.cpp
+)
+
+target_link_libraries(oj_admin_problems_api_test PRIVATE oj_core)
+
+add_test(NAME admin_problems_api COMMAND oj_admin_problems_api_test)

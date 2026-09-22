@@ -15,8 +15,9 @@
 - [x] M1.5 最小判题器（`IExecutor` 抽象 + `LocalExecutor` + `JudgeEngine`：C++17/C11 编译、逐点执行、基础超时、有界输出、归一化比对与 AC/WA/CE/TLE/RE/SYSERR 汇总；仅开发环境验证，完整沙箱见 M3）
 - [x] M1.6 提交接口与持久化（`POST /api/problems/{id}/submit`：登录/首改/可见性校验 + 后端隐藏用例判题 + 单事务写入 `submissions` 与 `user_problem_status` + 同步返回逐点结果）
 - [x] M1.7 最小前端（cpp-httplib 静态托管 `web/` + 原生 HTML/CSS/ES Module + hash 路由 + 注册/登录/改密/题目列表/题目页 `textarea` 提交 + 统一 API 封装；仅开发环境验证）
+- [x] M2.1 管理员题目接口（`POST`/`PUT`/`DELETE /api/admin/problems`：字段校验与默认值 + 部分更新语义 + 可见性设置 + 删除关联数据规则 + 统一管理员权限检查）
 
-后续阶段（提交历史与排行榜页面、后台管理、Rejudge、完整沙箱与判题线程池、CodeMirror）尚未实现。
+后续阶段（管理员测试用例接口、题目搜索筛选分页、用户管理、后台页面、Rejudge、完整沙箱与判题线程池、CodeMirror）尚未实现。
 
 ## 环境要求
 
@@ -116,6 +117,22 @@ ctest --test-dir build -R submit_api --output-on-failure
 状态与计数、多用户多题独立、8 路并发不丢计数且只有一条状态记录、SYSERR 记录与计数、
 持久化事务中途失败整体回滚、通过点不泄露隐藏用例、重启后源码/结果/次数/AC 状态/
 首次 AC 时间保留。
+
+管理员题目接口测试（M2.1，单元 + 集成，隔离临时库 + 随机端口 + 可注入执行器）：
+
+```bash
+ctest --test-dir build -R problem_admin_unit --output-on-failure
+ctest --test-dir build -R admin_problems_api --output-on-failure
+```
+
+`problem_admin_unit` 覆盖创建/部分更新请求体的字段校验（必填、类型、长度、难度枚举、
+标签结构、数值范围与默认值）及标签拼接。`admin_problems_api` 通过真实 HTTP 覆盖：
+建题返回有效 ID 与默认限制、创建后可查询且不泄露隐藏用例、改题后查询与数据库一致且
+`created_at` 保留/`updated_at` 更新、非法参数不产生记录与部分更新、游客/普通用户/
+未改密管理员被拒且数据库不变、角色撤销后旧 token 失效、隐藏题对游客/普通用户不可见且
+不可提交而管理员可见、重新公开恢复可见且不清除历史提交与状态、删除规则（无提交可删
+无孤立、有提交 409）、删除与提交并发时数据一致、不存在/非法 ID、数据库故障不泄露、
+重启后数据保留。
 
 配置管理单元测试（基于 gtest，无外部依赖，不触碰数据库与网络）：
 
@@ -477,6 +494,101 @@ curl -i http://127.0.0.1:8080/api/problems/1
 - 无效/伪造/过期 token 不会被当作游客或管理员：沿用既有约定返回 `401`。
 - 非法 ID（非数字、负数、0、溢出）返回 `400`；数据库故障返回 `500` 通用文案，
   不泄露 SQL、文件路径或隐藏用例。
+
+### 管理员题目接口（M2.1）
+
+三个接口均需管理员权限（已登录 + 已完成首次改密 + 当前数据库角色为 `admin`）。
+角色与首次改密标记每次按 `sub` 回查数据库，客户端提交的角色字段无效，角色被撤销后
+原 token 立即失去管理权限。隐藏测试用例的增删改属 M2.2，不在这三个接口范围内。
+
+#### 创建题目
+
+`POST /api/admin/problems`，请求体为 JSON，仅读取下表字段；`id`/`created_at`/
+`updated_at`/`seed_key` 由服务端管理，客户端传入一律忽略。
+
+```bash
+curl -i -X POST http://127.0.0.1:8080/api/admin/problems \
+  -H 'Authorization: Bearer <admin-token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"A+B","difficulty":"easy","description":"输入两个整数，输出和。",
+       "tags":["入门","数学"],"time_limit_ms":2000,"memory_limit_kb":65536,
+       "visible":true,"samples":[{"input":"1 2\n","output":"3\n"}]}'
+```
+
+成功响应（`201`）：
+
+```
+{"id":4}
+```
+
+#### 修改题目
+
+`PUT /api/admin/problems/{id}`，采用**部分更新**：只更新请求体中出现的字段，未出现的
+字段保持原值（避免遗漏字段被意外清空）；需要清空时显式传空值，如 `"description":""`、
+`"tags":[]`、`"samples":[]`。`samples` 出现时整体替换公开样例，隐藏用例不受影响。
+`created_at` 保留，`updated_at` 更新为当前时间。
+
+```bash
+curl -i -X PUT http://127.0.0.1:8080/api/admin/problems/4 \
+  -H 'Authorization: Bearer <admin-token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"difficulty":"medium","visible":false,"samples":[]}'
+```
+
+成功响应（`200`）：
+
+```
+{"id":4,"status":"ok"}
+```
+
+#### 删除题目
+
+`DELETE /api/admin/problems/{id}`。删除策略：
+
+- **题目已有提交记录时拒绝删除**，返回 `409`，保留学生提交历史与做题状态；
+- 无提交时在同一事务内删除该题的全部测试用例（公开样例与隐藏用例）、
+  `user_problem_status` 记录与题目本身，不产生孤立记录；
+- 不级联清空提交记录，也不新增软删除字段。
+
+```bash
+curl -i -X DELETE http://127.0.0.1:8080/api/admin/problems/4 \
+  -H 'Authorization: Bearer <admin-token>'
+```
+
+成功响应（`200`）：
+
+```
+{"status":"ok"}
+```
+
+字段规则：
+
+| 字段 | 类型 | 必填 | 规则 |
+|---|---|---|---|
+| `title` | string | 是 | 去首尾空白后非空，≤ 200 字节；入库为去空白后的值 |
+| `difficulty` | string | 是 | 仅 `easy` / `medium` / `hard` |
+| `description` | string | 否 | 纯文本，≤ 64 KiB，默认 `""` |
+| `tags` | string[] | 否 | 去空白后非空、不含逗号、每个 ≤ 30 字节、≤ 20 个、不可重复；默认 `[]` |
+| `time_limit_ms` | integer | 否 | `1..60000`，默认 `2000`；不接受 0/负数（项目未定义「无限」取值） |
+| `memory_limit_kb` | integer | 否 | `1..1048576`，默认 `65536`；不接受 0/负数 |
+| `visible` | boolean | 否 | 默认 `true`（创建时） |
+| `samples` | object[] | 否 | 每项含字符串 `input`/`output`（允许空串），≤ 50 组，默认 `[]` |
+
+错误约定：
+
+| 状态码 | 含义 |
+|---|---|
+| `201` / `200` | 创建成功 / 修改、删除成功 |
+| `400` | 非法参数：非法 JSON、缺少必填字段、类型错误、非法难度、标签结构错误、限制值越界、无可更新字段、非法题目 ID |
+| `401` | 未登录 / 无效 token |
+| `403` | 非管理员；或管理员未完成首次改密（含 `code:"PASSWORD_CHANGE_REQUIRED"`） |
+| `404` | 题目不存在（修改/删除） |
+| `409` | 删除冲突：题目已有提交记录 |
+| `500` | 内部故障（不泄露 SQL/路径） |
+
+> 可见性说明：管理员可将其设为隐藏并仍能在列表/详情中查看；游客与普通用户列表不含
+> 隐藏题、直接访问详情或发起新提交均被拒（`404`）。可见性变化不会清除已有提交与做题
+> 状态，也不重判历史提交（Rejudge 见 M3.6）。
 
 ### 提交接口（M1.6）
 

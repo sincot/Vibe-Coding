@@ -218,6 +218,24 @@ SubmitService::Outcome SubmitService::submit(std::int64_t user_id,
     return outcome;
   }
 
+  // 4a. 事务内复核题目仍存在：判题在事务外完成，期间题目可能被管理员删除。
+  //     在同一事务内复核可避免向已删除题目写入提交，产生假成功或外键错误。
+  //     若题目已不存在，按「题目不存在」处理（与判题前的可见性检查同义）。
+  bool still_found = false;
+  ProblemRecord rechecked;
+  if (!problems_.find_by_id(problem_id, still_found, rechecked, err)) {
+    log(LogLevel::Error, "提交：复核题目失败: " + err);
+    db_.rollback(err);
+    outcome.kind = Kind::InternalError;
+    outcome.error = "内部错误";
+    return outcome;
+  }
+  if (!still_found) {
+    db_.rollback(err);
+    outcome.kind = Kind::ProblemNotFound;
+    return outcome;
+  }
+
   std::int64_t new_id = 0;
   if (!submissions_.insert(record, new_id, err)) {
     log(LogLevel::Error, "提交：写入提交记录失败: " + err);
