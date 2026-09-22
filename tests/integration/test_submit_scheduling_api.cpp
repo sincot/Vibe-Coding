@@ -985,6 +985,140 @@ void test_multi_user_multi_problem_no_mix() {
   check(status_rows_ok, "每个用户×题目只有一条状态记录");
 }
 
+// ---------------------------------------------------------------------------
+// T-021：服务停止时取消正在运行的真实判题与排队任务，结果均落库、无遗留进程
+// ---------------------------------------------------------------------------
+
+void test_stop_cancels_running_real_judge() {
+  std::cout << "停止服务：取消正在运行与排队的真实判题，结果落库且无遗留进程\n";
+  TempDir workspace("sched_cancel_ws");
+  oj::judge::JudgeOptions options;
+  options.workspace_root = workspace.sub("judge");
+  // 单 worker：第一个任务占住 worker，第二个进入等待队列。
+  Env env("sched_cancel", nullptr, options, JudgeManager::Options(8, 1));
+  check(env.ok(), "真实服务启动成功");
+  httplib::Client cli = make_client(env.port());
+
+  User user = make_user(cli, env.db(), "cancel_user", "CancelPw1");
+  std::int64_t pid = insert_problem(env.db(), "取消题", 1, 60000);
+  insert_testcase(env.db(), pid, 0, "", "");
+  const std::string pid_text = std::to_string(pid);
+
+  const char *kLoop = "int main(){ volatile unsigned long long c=0; "
+                      "while(true){ c++; } return 0; }\n";
+  const char *kFast = "int main(){ return 0; }\n";
+
+  std::string status_running;
+  std::string status_queued;
+  std::thread running_thread([&]() {
+    httplib::Client thread_cli = make_client(env.port());
+    auto res = submit(thread_cli, user.token, pid_text, "cpp17", kLoop);
+    if (res && res->status == 200) {
+      status_running = json::parse(res->body).value("status", "");
+    }
+  });
+  check(wait_until(
+            [&]() { return env.server()->judge_manager()->active_count() == 1; },
+            kShort),
+        "死循环任务开始执行");
+
+  std::thread queued_thread([&]() {
+    httplib::Client thread_cli = make_client(env.port());
+    auto res = submit(thread_cli, user.token, pid_text, "cpp17", kFast);
+    if (res && res->status == 200) {
+      status_queued = json::parse(res->body).value("status", "");
+    }
+  });
+  check(wait_until(
+            [&]() { return env.server()->judge_manager()->queued_count() == 1; },
+            kShort),
+        "第二个任务进入等待队列");
+
+  auto stop_start = std::chrono::steady_clock::now();
+  env.stop();
+  auto stop_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - stop_start)
+                          .count();
+  running_thread.join();
+  queued_thread.join();
+
+  check(stop_elapsed < 5000, "停止在数秒内返回（未等待死循环自然结束）");
+  check(status_running == "SYSERR" && status_queued == "SYSERR",
+        "正在运行与排队任务均以 SYSERR（服务取消）明确结束");
+  check(count_rows(env.db(), "submissions") == 2,
+        "取消结果在数据库关闭前持久化（2 条）");
+  check(count_status_rows(env.db(), user.id, pid) == 1, "只有一条状态记录");
+
+  int status = 0;
+  pid_t leftover = ::waitpid(-1, &status, WNOHANG);
+  check(leftover <= 0, "停止后无遗留判题子进程");
+
+  env.close_db();
+}
+
+// ---------------------------------------------------------------------------
+// T-022：多个 worker 并发执行超时、崩溃与正常任务，互不误杀、结果正确
+// ---------------------------------------------------------------------------
+
+void test_concurrent_timeout_crash_normal_no_cross_kill() {
+  std::cout << "并发超时/崩溃/正常任务：互不误杀、各自结果正确\n";
+  TempDir workspace("sched_mixed_ws");
+  oj::judge::JudgeOptions options;
+  options.workspace_root = workspace.sub("judge");
+  Env env("sched_mixed", nullptr, options, JudgeManager::Options(8, 3));
+  check(env.ok(), "真实服务启动成功");
+  httplib::Client cli = make_client(env.port());
+
+  User user = make_user(cli, env.db(), "mixed_user", "MixedPw1");
+  std::int64_t pid = insert_problem(env.db(), "并发混合题", 1, 400);
+  insert_testcase(env.db(), pid, 0, "", "");
+  const std::string pid_text = std::to_string(pid);
+
+  const char *kLoop = "int main(){ volatile unsigned long long c=0; "
+                      "while(true){ c++; } return 0; }\n";
+  const char *kCrash = "#include <cstdlib>\nint main(){ std::abort(); }\n";
+  const char *kOk = "int main(){ return 0; }\n";
+
+  struct Job {
+    std::string code;
+    std::string expected;
+  };
+  std::vector<Job> jobs = {{kLoop, "TLE"}, {kCrash, "RE"}, {kOk, "AC"}};
+
+  std::vector<std::string> statuses(jobs.size());
+  std::vector<std::thread> threads;
+  for (std::size_t i = 0; i < jobs.size(); ++i) {
+    threads.emplace_back([&, i]() {
+      httplib::Client thread_cli = make_client(env.port());
+      auto res =
+          submit(thread_cli, user.token, pid_text, "cpp17", jobs[i].code);
+      if (res && res->status == 200) {
+        statuses[i] = json::parse(res->body).value("status", "");
+      }
+    });
+  }
+  for (auto &thread : threads) {
+    thread.join();
+  }
+
+  bool all_expected = true;
+  for (std::size_t i = 0; i < jobs.size(); ++i) {
+    if (statuses[i] != jobs[i].expected) {
+      all_expected = false;
+      std::cout << "    [INFO] 任务 " << i << " 期望 " << jobs[i].expected
+                << " 实得 " << statuses[i] << "\n";
+    }
+  }
+  check(all_expected, "并发超时/崩溃/正常任务各自结果正确（无混用）");
+
+  int status = 0;
+  pid_t leftover = ::waitpid(-1, &status, WNOHANG);
+  check(leftover <= 0, "并发混合任务后无遗留子进程");
+  check(count_rows(env.db(), "submissions") == 3, "三个任务各持久化一次");
+
+  env.close_db();
+}
+
 } // namespace
 
 int main() {
@@ -996,6 +1130,8 @@ int main() {
   test_real_compile_concurrent();
   test_graceful_stop_drains_accepted_tasks();
   test_multi_user_multi_problem_no_mix();
+  test_stop_cancels_running_real_judge();
+  test_concurrent_timeout_crash_normal_no_cross_kill();
 
   std::cout << "\n==== 调度集成测试" << (g_failures == 0 ? "全部通过" : "存在失败")
             << "（失败 " << g_failures << " 项）====\n";

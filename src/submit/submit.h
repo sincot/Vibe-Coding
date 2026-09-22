@@ -98,9 +98,13 @@ public:
   // submitted_at 为原始提交时间（调度器接受入队时采集的 UTC 时间字符串），
   // 用作 submissions.created_at 与 first_ac_at 的统一口径；传入空串时退回当前时间。
   // 排队等待判题的时间不计入该时间戳，也不计入任何测试点耗时。
+  //
+  // cancel 非空时支持服务停止取消：不再启动新进程，正在运行/编译的进程组会被终止，
+  // 取消结果按内部错误 SYSERR 正常持久化（先于数据库关闭）。
   Outcome submit(std::int64_t user_id, std::int64_t problem_id,
                  const std::string &language, const std::string &source_code,
-                 bool viewer_is_admin, const std::string &submitted_at);
+                 bool viewer_is_admin, const std::string &submitted_at,
+                 const judge::CancellationToken *cancel = nullptr);
 
 private:
   Database &db_;

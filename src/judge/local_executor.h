@@ -28,11 +28,12 @@ public:
 private:
   // 以 argv 启动进程：stdin 写入 input，stdout/stderr 有界采集。
   // merge_stderr=true 时诊断信息合并到 stdout_data（供编译使用）。
+  // cancel 非空时轮询取消令牌，服务停止时终止整个进程组。
   ProcessResult spawn(const std::vector<std::string> &argv,
                       const std::string &working_directory,
                       const std::string &input, int time_limit_ms,
                       std::size_t stdout_limit, std::size_t stderr_limit,
-                      bool merge_stderr);
+                      bool merge_stderr, const CancellationToken *cancel);
 };
 
 } // namespace judge

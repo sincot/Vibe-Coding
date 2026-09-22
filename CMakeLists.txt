@@ -97,6 +97,7 @@ add_library(oj_core STATIC
   src/auth/authorize.cpp
   src/auth/password_change.cpp
   src/judge/executor.cpp
+  src/judge/deadline.cpp
   src/judge/comparator.cpp
   src/judge/workspace.cpp
   src/judge/local_executor.cpp
@@ -307,6 +308,16 @@ add_executable(oj_judge_unit
 target_link_libraries(oj_judge_unit PRIVATE oj_core GTest::gtest_main)
 
 add_test(NAME judge_unit COMMAND oj_judge_unit)
+
+# M3.2 截止时间与超时控制单元测试（gtest）：单调时钟剩余时间、有效单点时限、
+# 全局硬上限跨点累计与结果保留、编译保护超时与全局裁剪区分、协作式取消。
+add_executable(oj_judge_deadline_unit
+  tests/unit/test_judge_deadline.cpp
+)
+
+target_link_libraries(oj_judge_deadline_unit PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME judge_deadline_unit COMMAND oj_judge_deadline_unit)
 
 # M3.1 判题调度器单元测试（gtest）：worker 数量规则、同步屏障证明并发、活动任务
 # 上限、有界等待队列满载拒绝与并发入队、结果通道独立、异常隔离、停止排空与回收。

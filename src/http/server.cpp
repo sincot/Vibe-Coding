@@ -321,7 +321,8 @@ HttpServer::HttpServer(std::string host, int port, Database &db,
       [this](const judge::SubmissionTask &task) {
         return submit_service_->submit(task.user_id, task.problem_id,
                                        task.language, task.source_code,
-                                       task.viewer_is_admin, task.submitted_at);
+                                       task.viewer_is_admin, task.submitted_at,
+                                       task.cancel.get());
       },
       manager_options);
 
@@ -363,14 +364,22 @@ bool HttpServer::start(std::string &error) {
 
 void HttpServer::stop() {
   if (running_.exchange(false)) {
+    // 先通知判题调度器取消：正在执行的判题任务尽快终止子进程，等待队列中的任务
+    // 在取出后短路、不再启动新进程。必须在 svr_.stop() 之前完成，否则 cpp-httplib
+    // 会等待仍在同步等待判题结果的 HTTP 处理线程，而停止流程又在等 HTTP 线程结束，
+    // 造成不必要的长时间等待。
+    if (judge_manager_) {
+      judge_manager_->cancel_all();
+    }
     svr_.stop();
     if (listen_thread_.joinable()) {
       listen_thread_.join();
     }
   }
   // HTTP 处理线程（含正在同步等待判题结果的请求）此时已全部结束；再停止判题
-  // 调度器，执行完已接收任务并回收 worker，保证随后关闭数据库时没有 worker
-  // 仍在使用数据库。幂等：可重复调用。
+  // 调度器并回收 worker，保证随后关闭数据库时没有 worker 仍在使用数据库。
+  // 已接收任务的结果（含取消产生的 SYSERR）都在 join 之前持久化，数据库保持可用。
+  // 幂等：可重复调用。
   if (judge_manager_) {
     judge_manager_->shutdown();
   }

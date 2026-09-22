@@ -85,6 +85,24 @@ std::size_t JudgeManager::queued_count() const {
   return queue_.size();
 }
 
+void JudgeManager::cancel_all() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  stopped_ = true;
+  // 正在执行与等待执行的任务都置位取消令牌：正在运行的任务据此终止子进程，等待中
+  // 的任务在被取出后立即短路（不启动新进程）。所有已接收任务仍会得到一个明确结果。
+  for (const std::shared_ptr<Item> &item : queue_) {
+    if (item->task.cancel) {
+      item->task.cancel->cancel();
+    }
+  }
+  for (Item *item : active_items_) {
+    if (item->task.cancel) {
+      item->task.cancel->cancel();
+    }
+  }
+  not_empty_.notify_all();
+}
+
 void JudgeManager::shutdown() {
   // 串行化并发/重复调用；已回收则直接返回。
   std::lock_guard<std::mutex> shutdown_lock(shutdown_mutex_);
@@ -92,14 +110,10 @@ void JudgeManager::shutdown() {
     return;
   }
 
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    stopped_ = true;
-  }
-  not_empty_.notify_all();
+  // 先通知取消（不在 shutdown_mutex_ 之外重复加锁），再回收 worker。等待队列中的
+  // 任务会被 worker 依次取出并交付取消结果，已接收任务的结果通道不会永久挂起。
+  cancel_all();
 
-  // drain 策略：worker 会把队列中所有已接收任务执行完毕才退出，保证每个已接收
-  // 任务的结果通道都被投递，不会留下永久等待的 future。
   for (std::thread &worker : workers_) {
     if (worker.joinable()) {
       worker.join();
@@ -122,6 +136,7 @@ void JudgeManager::worker_loop() {
       }
       item = std::move(queue_.front());
       queue_.pop_front();
+      active_items_.insert(item.get());
     }
 
     active_.fetch_add(1);
@@ -135,6 +150,10 @@ void JudgeManager::worker_loop() {
       outcome = make_internal_error("判题任务异常");
     }
 
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      active_items_.erase(item.get());
+    }
     try {
       item->promise.set_value(std::move(outcome));
     } catch (...) {

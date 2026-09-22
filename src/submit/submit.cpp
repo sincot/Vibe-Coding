@@ -31,6 +31,9 @@ nlohmann::json build_per_case(const judge::JudgeTask &task,
     entry["status"] = judge::judge_status_name(item.status);
     entry["time_ms"] = item.time_ms;
     entry["memory_kb"] = nullptr;
+    if (item.global_deadline_hit) {
+      entry["global_deadline_hit"] = true;
+    }
     if (item.status != judge::JudgeStatus::AC) {
       entry["exit_code"] = item.exit_code;
       entry["term_signal"] = item.term_signal;
@@ -146,7 +149,8 @@ SubmitService::Outcome SubmitService::submit(std::int64_t user_id,
                                              const std::string &language,
                                              const std::string &source_code,
                                              bool viewer_is_admin,
-                                             const std::string &submitted_at) {
+                                             const std::string &submitted_at,
+                                             const judge::CancellationToken *cancel) {
   Outcome outcome;
 
   // 1. 题目存在性与可见性（复用 M1.4 规则）。不存在与无权访问统一返回，
@@ -192,7 +196,7 @@ SubmitService::Outcome SubmitService::submit(std::int64_t user_id,
   judge::JudgeResult judge_result;
   try {
     judge::JudgeEngine engine(executor_, options_);
-    judge_result = engine.judge(task);
+    judge_result = engine.judge(task, cancel);
   } catch (const std::exception &e) {
     // 判题过程抛出异常（如执行器内部故障）转换为既有约定的内部判题错误 SYSERR，
     // 不假死、不使 worker 退出，用户可重试。

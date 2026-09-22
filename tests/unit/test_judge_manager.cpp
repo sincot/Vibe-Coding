@@ -419,4 +419,58 @@ TEST(JudgeManagerOptions, DefaultAndZeroCapacityAreBounded) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// cancel_all：非阻塞地取消正在执行与等待中的任务，并停止接收新任务
+// ---------------------------------------------------------------------------
+
+TEST(JudgeManagerCancel, AllCancelsActiveAndQueuedWithoutBlocking) {
+  Gate gate;
+  std::mutex record_mutex;
+  int active_saw_cancel = -1;
+  int queued_saw_cancel = -1;
+
+  JudgeManager manager(
+      [&](const SubmissionTask &task) {
+        gate.enter(); // 正在执行的任务在此被挡住，直到放行
+        const bool saw = task.cancel && task.cancel->cancelled();
+        std::lock_guard<std::mutex> lock(record_mutex);
+        if (task.problem_id == 1) {
+          active_saw_cancel = saw ? 1 : 0;
+        } else if (task.problem_id == 2) {
+          queued_saw_cancel = saw ? 1 : 0;
+        }
+        return ok_outcome();
+      },
+      JudgeManager::Options(/*capacity=*/8, /*workers=*/1));
+
+  auto active = manager.submit(make_task(1)); // 占住唯一 worker
+  ASSERT_EQ(active.status, JudgeManager::EnqueueStatus::Accepted);
+  ASSERT_TRUE(gate.wait_entered(1, kWait));
+  auto queued = manager.submit(make_task(2)); // 进入等待队列
+  ASSERT_EQ(queued.status, JudgeManager::EnqueueStatus::Accepted);
+  EXPECT_EQ(manager.queued_count(), 1u);
+
+  // cancel_all 必须在 active 任务仍被挡住时立即返回（不阻塞、不回收 worker）。
+  const auto start = std::chrono::steady_clock::now();
+  manager.cancel_all();
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now() - start)
+                           .count();
+  EXPECT_LT(elapsed, 500) << "cancel_all 在任务仍执行时不应阻塞";
+  EXPECT_EQ(manager.active_count(), 1u);
+  EXPECT_EQ(manager.queued_count(), 1u);
+  // 停止接收新任务。
+  EXPECT_EQ(manager.submit(make_task(3)).status,
+            JudgeManager::EnqueueStatus::Stopped);
+
+  // 放行后：正在执行与等待中的任务都观察到取消令牌，且结果均被投递（不永久挂起）。
+  gate.release();
+  EXPECT_EQ(active.future.get().kind, SubmitService::Kind::Ok);
+  EXPECT_EQ(queued.future.get().kind, SubmitService::Kind::Ok);
+  EXPECT_EQ(active_saw_cancel, 1);
+  EXPECT_EQ(queued_saw_cancel, 1);
+
+  manager.shutdown();
+}
+
 } // namespace

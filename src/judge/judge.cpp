@@ -30,7 +30,8 @@ JudgeStatus summarize_cases(const std::vector<TestcaseResult> &cases) {
 JudgeEngine::JudgeEngine(IExecutor &executor, JudgeOptions options)
     : executor_(executor), options_(std::move(options)) {}
 
-JudgeResult JudgeEngine::judge(const JudgeTask &task) {
+JudgeResult JudgeEngine::judge(const JudgeTask &task,
+                               const CancellationToken *cancel) {
   JudgeResult result;
   result.total = static_cast<int>(task.testcases.size());
 
@@ -53,10 +54,36 @@ JudgeResult JudgeEngine::judge(const JudgeTask &task) {
     return result;
   }
 
-  int time_limit_ms = task.time_limit_ms;
-  if (time_limit_ms > options_.max_time_limit_ms) {
-    // SPEC JUDGE-10：即使题目时限配置过大，也受全局硬上限约束。
-    time_limit_ms = options_.max_time_limit_ms;
+  // 单测试点时限先按硬上限裁剪（SPEC JUDGE-10），再与剩余全局预算取较小者。
+  int problem_limit_ms = task.time_limit_ms;
+  if (problem_limit_ms > options_.max_time_limit_ms) {
+    problem_limit_ms = options_.max_time_limit_ms;
+  }
+
+  // 全局截止时间在本次判题开始时确定，使用单调时钟，覆盖编译与全部测试点执行，
+  // 不包含排队等待；即使题目时限为无限/极大也生效，进入新测试点不会重置。
+  const Deadline global_deadline =
+      Deadline::after_ms(options_.global_time_limit_ms);
+
+  // 全局硬上限耗尽：终止剩余执行，保留已有逐点结果；未执行点不写入 cases。
+  auto mark_global_exhausted = [&result, this]() {
+    result.global_deadline_hit = true;
+    result.status = JudgeStatus::SYSERR;
+    result.message = "全局判题时间上限（" +
+                     std::to_string(options_.global_time_limit_ms) +
+                     " ms）耗尽，剩余测试点未执行";
+  };
+  // 服务停止：按内部错误约定处理，绝不归咎于用户程序。
+  auto mark_cancelled = [&result]() {
+    result.cancelled = true;
+    result.status = JudgeStatus::SYSERR;
+    result.message = "服务停止，判题已取消";
+  };
+
+  // 已收到取消信号：不创建目录、不启动任何进程。
+  if (cancel != nullptr && cancel->cancelled()) {
+    mark_cancelled();
+    return result;
   }
 
   // 2. 独立临时工作目录。
@@ -82,7 +109,20 @@ JudgeResult JudgeEngine::judge(const JudgeTask &task) {
     return result;
   }
 
-  // 3. 编译一次。
+  // 3. 编译一次。编译预算取「编译保护超时」与剩余全局预算的较小者；若是被全局
+  //    预算裁剪导致超时，按全局硬上限处理（SYSERR）而非普通编译错误（CE）。
+  const int remaining_before_compile = global_deadline.remaining_ms();
+  if (remaining_before_compile <= 0) {
+    mark_global_exhausted();
+    return result;
+  }
+  int compile_limit_ms = options_.compile_time_limit_ms;
+  bool compile_global_capped = false;
+  if (compile_limit_ms > remaining_before_compile) {
+    compile_limit_ms = remaining_before_compile;
+    compile_global_capped = true;
+  }
+
   CompileRequest compile_request;
   compile_request.language = language;
   compile_request.compiler =
@@ -91,8 +131,9 @@ JudgeResult JudgeEngine::judge(const JudgeTask &task) {
   compile_request.source_path = source_path;
   compile_request.output_path = executable_path;
   compile_request.working_directory = workspace->path();
-  compile_request.time_limit_ms = options_.compile_time_limit_ms;
+  compile_request.time_limit_ms = compile_limit_ms;
   compile_request.output_limit_bytes = options_.compile_output_limit_bytes;
+  compile_request.cancel = cancel;
 
   ProcessResult compile_result = executor_.compile(compile_request);
   result.compile_output = compile_result.stdout_data;
@@ -103,6 +144,10 @@ JudgeResult JudgeEngine::judge(const JudgeTask &task) {
     result.compile_output += compile_result.stderr_data;
   }
 
+  if (compile_result.cancelled) {
+    mark_cancelled();
+    return result;
+  }
   if (compile_result.launch_error) {
     // 编译器不存在等属于执行环境故障，绝不伪装成 CE。
     result.status = JudgeStatus::SYSERR;
@@ -110,6 +155,10 @@ JudgeResult JudgeEngine::judge(const JudgeTask &task) {
     return result;
   }
   if (compile_result.timed_out) {
+    if (compile_global_capped) {
+      mark_global_exhausted();
+      return result;
+    }
     result.status = JudgeStatus::CE;
     result.message = "编译超时（" +
                      std::to_string(options_.compile_time_limit_ms) + " ms）";
@@ -138,16 +187,35 @@ JudgeResult JudgeEngine::judge(const JudgeTask &task) {
   }
   result.compile_ok = true;
 
-  // 4. 顺序执行测试点。普通 WA 不阻止后续测试点；仅内部执行故障会提前终止。
+  // 4. 顺序执行测试点。普通 WA 不阻止后续测试点。每个测试点的有效时限为题目时限
+  //    与剩余全局预算的较小者；全局预算耗尽则不再启动新测试点，已有结果保留。
   for (std::size_t i = 0; i < task.testcases.size(); ++i) {
+    if (cancel != nullptr && cancel->cancelled()) {
+      mark_cancelled();
+      break;
+    }
+    const int remaining_global_ms = global_deadline.remaining_ms();
+    if (remaining_global_ms <= 0) {
+      mark_global_exhausted();
+      break;
+    }
+    const int effective_limit_ms =
+        effective_time_limit_ms(problem_limit_ms, remaining_global_ms);
+    if (effective_limit_ms <= 0) {
+      mark_global_exhausted();
+      break;
+    }
+    const bool global_capped = effective_limit_ms < problem_limit_ms;
+
     const Testcase &testcase = task.testcases[i];
 
     RunRequest run_request;
     run_request.executable_path = executable_path;
     run_request.working_directory = workspace->path();
-    run_request.time_limit_ms = time_limit_ms;
+    run_request.time_limit_ms = effective_limit_ms;
     run_request.stdout_limit_bytes = options_.stdout_limit_bytes;
     run_request.stderr_limit_bytes = options_.stderr_limit_bytes;
+    run_request.cancel = cancel;
 
     ProcessResult run_result = executor_.run(run_request, testcase.input);
 
@@ -160,17 +228,32 @@ JudgeResult JudgeEngine::judge(const JudgeTask &task) {
     case_result.term_signal = run_result.term_signal;
     case_result.stderr_output = run_result.stderr_data;
 
-    if (run_result.launch_error) {
+    if (run_result.cancelled) {
       case_result.status = JudgeStatus::SYSERR;
-      case_result.message = "无法启动运行进程: " +
-                            run_result.launch_error_message;
+      case_result.message = "服务停止，判题已取消";
+      result.cases.push_back(std::move(case_result));
+      mark_cancelled();
+      break;
+    } else if (run_result.launch_error) {
+      case_result.status = JudgeStatus::SYSERR;
+      case_result.message =
+          "无法启动运行进程: " + run_result.launch_error_message;
       result.cases.push_back(std::move(case_result));
       break; // 系统故障：无法继续可靠判题，提前终止
-    }
-    if (run_result.timed_out) {
+    } else if (run_result.timed_out && global_capped) {
+      // 该点并未超过题目时限，而是可用全局预算不足以完成，属全局硬上限终止。
+      case_result.status = JudgeStatus::TLE;
+      case_result.global_deadline_hit = true;
+      case_result.message = "触发全局判题时间上限（" +
+                            std::to_string(options_.global_time_limit_ms) +
+                            " ms）";
+      result.cases.push_back(std::move(case_result));
+      mark_global_exhausted();
+      break;
+    } else if (run_result.timed_out) {
       case_result.status = JudgeStatus::TLE;
       case_result.message =
-          "超出时间限制（" + std::to_string(time_limit_ms) + " ms）";
+          "超出时间限制（" + std::to_string(problem_limit_ms) + " ms）";
     } else if (run_result.term_signal != 0) {
       case_result.status = JudgeStatus::RE;
       case_result.message = "运行时被信号 " +
@@ -202,9 +285,14 @@ JudgeResult JudgeEngine::judge(const JudgeTask &task) {
     result.cases.push_back(std::move(case_result));
   }
 
-  // 5. 汇总。
+  // 5. 汇总。全局硬上限或服务取消终止时按内部错误处理，覆盖逐点汇总结果，
+  //    但保留已经获得的逐点结果与 passed 计数。
   result.status = summarize_cases(result.cases);
-  if (result.status == JudgeStatus::AC) {
+  if (result.global_deadline_hit) {
+    result.status = JudgeStatus::SYSERR;
+  } else if (result.cancelled) {
+    result.status = JudgeStatus::SYSERR;
+  } else if (result.status == JudgeStatus::AC) {
     result.message = "全部测试点通过";
   } else if (result.status == JudgeStatus::WA) {
     result.message = "存在输出不匹配的测试点";

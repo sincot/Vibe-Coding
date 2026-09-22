@@ -7,6 +7,8 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -14,6 +16,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <climits>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -77,6 +80,73 @@ bool set_nonblocking(int fd) {
     return false;
   }
   return ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+
+// 子进程在 exec 前关闭所有无关文件描述符，避免继承服务监听套接字、数据库连接、
+// 其它任务的管道等。保留 keep_fd（用于 exec 失败时回传 errno）。
+//
+// 优先使用 Linux close_range(2)（一次系统调用，异步信号安全）；内核不支持时退回
+// 有界循环（close(2) 同样异步信号安全）。仅关注本次任务自身需要保留的 fd，不读取
+// /proc 或进行任何内存分配。
+void close_extra_fds(int keep_fd) {
+#ifdef SYS_close_range
+  if (keep_fd > 3) {
+    // 关闭 [3, keep_fd) 与 [keep_fd+1, 无穷)，保留 keep_fd。
+    if (::syscall(SYS_close_range, 3u,
+                  static_cast<unsigned int>(keep_fd - 1), 0u) == 0 &&
+        ::syscall(SYS_close_range, static_cast<unsigned int>(keep_fd + 1),
+                  ~0u, 0u) == 0) {
+      return;
+    }
+  } else if (keep_fd == 3) {
+    if (::syscall(SYS_close_range, 4u, ~0u, 0u) == 0) {
+      return;
+    }
+  } else {
+    if (::syscall(SYS_close_range, 3u, ~0u, 0u) == 0) {
+      return;
+    }
+  }
+#endif
+  long max_fd = 1024;
+  struct rlimit limit;
+  if (::getrlimit(RLIMIT_NOFILE, &limit) == 0 &&
+      limit.rlim_cur != RLIM_INFINITY) {
+    max_fd = static_cast<long>(limit.rlim_cur);
+  }
+  if (max_fd > 65536) {
+    max_fd = 65536; // 兜底上限，避免在极端 rlimit 下长时间循环
+  }
+  for (int fd = 3; fd < max_fd; ++fd) {
+    if (fd != keep_fd) {
+      ::close(fd);
+    }
+  }
+}
+
+// 终止整个进程组（子进程在 fork 后 setpgid(0,0)，pgid == pid），从而覆盖用户程序
+// fork 出的后代进程，而不是只杀外层进程。若进程组已不存在则退回按 pid 终止。
+// 注意：本函数只清理由本次任务创建、且尚未回收的进程；子进程一旦被 waitpid 回收，
+// 又仍有后代持有输出管道时进程组依然存在（正是需要清理的情形），否则不会误杀复用
+// 的 PID。完整的进程逃逸/恶意隔离属 M3.3。
+void kill_process_group(pid_t pid) {
+  if (pid <= 0) {
+    return;
+  }
+  if (::kill(-pid, SIGKILL) != 0 && errno == ESRCH) {
+    ::kill(pid, SIGKILL);
+  }
+}
+
+// waitpid 包装：重试 EINTR，保证系统调用被信号中断后仍能取得退出状态。
+pid_t waitpid_retry(pid_t pid, int *status, int options) {
+  for (;;) {
+    pid_t result = ::waitpid(pid, status, options);
+    if (result < 0 && errno == EINTR) {
+      continue;
+    }
+    return result;
+  }
 }
 
 // 追加数据但有长度上限；超过上限只标记截断，不再增长缓冲。
@@ -152,7 +222,8 @@ ProcessResult LocalExecutor::compile(const CompileRequest &request) {
   // 编译诊断统一走标准错误，合并到同一缓冲以保留顺序。
   return spawn(argv, request.working_directory, /*input=*/"",
                request.time_limit_ms, request.output_limit_bytes,
-               request.output_limit_bytes, /*merge_stderr=*/true);
+               request.output_limit_bytes, /*merge_stderr=*/true,
+               request.cancel);
 }
 
 ProcessResult LocalExecutor::run(const RunRequest &request,
@@ -161,7 +232,7 @@ ProcessResult LocalExecutor::run(const RunRequest &request,
   argv.push_back(request.executable_path);
   return spawn(argv, request.working_directory, input, request.time_limit_ms,
                request.stdout_limit_bytes, request.stderr_limit_bytes,
-               /*merge_stderr=*/false);
+               /*merge_stderr=*/false, request.cancel);
 }
 
 ProcessResult LocalExecutor::spawn(const std::vector<std::string> &argv,
@@ -169,7 +240,8 @@ ProcessResult LocalExecutor::spawn(const std::vector<std::string> &argv,
                                    const std::string &input, int time_limit_ms,
                                    std::size_t stdout_limit,
                                    std::size_t stderr_limit,
-                                   bool merge_stderr) {
+                                   bool merge_stderr,
+                                   const CancellationToken *cancel) {
   ignore_sigpipe_once();
 
   ProcessResult result;
@@ -177,6 +249,13 @@ ProcessResult LocalExecutor::spawn(const std::vector<std::string> &argv,
   if (argv.empty() || argv[0].empty()) {
     result.launch_error = true;
     result.launch_error_message = "空的可执行文件路径";
+    return result;
+  }
+
+  // 服务已请求取消：不启动任何新进程。
+  if (cancel != nullptr && cancel->cancelled()) {
+    result.cancelled = true;
+    result.launch_error_message = "任务已取消";
     return result;
   }
 
@@ -270,6 +349,9 @@ ProcessResult LocalExecutor::spawn(const std::vector<std::string> &argv,
       (void)ignored;
       _exit(127);
     }
+    // 仅保留错误管道，关闭继承自父进程的无关文件描述符（监听套接字、数据库连接、
+    // 其它任务的管道等），避免子进程意外持有服务资源。
+    close_extra_fds(exec_w.get());
     if (!working_directory.empty() &&
         ::chdir(working_directory.c_str()) != 0) {
       int err = errno;
@@ -284,6 +366,10 @@ ProcessResult LocalExecutor::spawn(const std::vector<std::string> &argv,
     _exit(127);
   }
 
+  // 父进程：与子进程的 setpgid 竞态兜底。若子进程已 exec 则返回 EACCES，忽略即可。
+  // 完成后即可用 kill(-pid) 终止整个进程组（覆盖后代进程）。
+  (void)::setpgid(pid, pid);
+
   // 父进程：关闭子进程侧端口。
   in_r.reset();
   out_w.reset();
@@ -297,10 +383,13 @@ ProcessResult LocalExecutor::spawn(const std::vector<std::string> &argv,
   {
     int child_errno = 0;
     ssize_t n = ::read(exec_r.get(), &child_errno, sizeof(child_errno));
+    if (n < 0 && errno == EINTR) {
+      n = ::read(exec_r.get(), &child_errno, sizeof(child_errno));
+    }
     exec_r.reset();
     if (n == static_cast<ssize_t>(sizeof(child_errno))) {
       int status = 0;
-      ::waitpid(pid, &status, 0); // 回收未成功启动的进程
+      waitpid_retry(pid, &status, 0); // 回收未成功启动的进程
       result.launch_error = true;
       result.launch_error_message =
           std::string("启动进程失败: ") + std::strerror(child_errno);
@@ -340,7 +429,7 @@ ProcessResult LocalExecutor::spawn(const std::vector<std::string> &argv,
   while (true) {
     if (!child_reaped) {
       int st = 0;
-      pid_t reaped = ::waitpid(pid, &st, WNOHANG);
+      pid_t reaped = waitpid_retry(pid, &st, WNOHANG);
       if (reaped == pid) {
         child_reaped = true;
         have_status = true;
@@ -357,15 +446,29 @@ ProcessResult LocalExecutor::spawn(const std::vector<std::string> &argv,
     }
 
     auto now = std::chrono::steady_clock::now();
+
+    // 服务取消：尽快终止整个进程组。仅在尚未回收时杀死外层进程；若外层已退出但
+    // 后代仍持有管道，同样需要清理进程组，否则输出采集会一直等不到 EOF。
+    if (!killed && cancel != nullptr && cancel->cancelled()) {
+      result.cancelled = true;
+      killed = true;
+      kill_process_group(pid);
+    }
+
     if (!killed && !child_reaped && now >= deadline) {
       result.timed_out = true;
       killed = true;
-      ::kill(pid, SIGKILL);
+      kill_process_group(pid);
     }
 
-    // 子进程已被回收但仍持有读端（如孙进程）：短暂排空后强制关闭，避免挂死。
+    // 外层进程已被回收但仍持有读端（如后代进程）：先尝试清理进程组使其释放管道，
+    // 短暂宽限后仍占用则强制关闭读端，避免因后代进程持续占用而无限等待。
     if (child_reaped && (out_open || err_open) &&
         now - child_reaped_at > std::chrono::milliseconds(200)) {
+      if (!killed) {
+        killed = true;
+        kill_process_group(pid);
+      }
       out_r.reset();
       err_r.reset();
       out_open = false;
@@ -504,12 +607,12 @@ ProcessResult LocalExecutor::spawn(const std::vector<std::string> &argv,
   }
 
   if (read_failed && !child_reaped) {
-    ::kill(pid, SIGKILL);
+    kill_process_group(pid);
   }
 
   if (!child_reaped) {
     int st = 0;
-    if (::waitpid(pid, &st, 0) == pid) {
+    if (waitpid_retry(pid, &st, 0) == pid) {
       child_reaped = true;
       have_status = true;
       status = st;

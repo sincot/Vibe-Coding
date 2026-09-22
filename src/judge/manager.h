@@ -9,10 +9,12 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "judge/deadline.h"
 #include "submit/submit.h"
 
 namespace oj {
@@ -37,6 +39,9 @@ struct SubmissionTask {
   std::string source_code; // 完整用户源码，不裁剪不修改
   bool viewer_is_admin = false; // 是否允许向隐藏题提交（由鉴权层判定）
   std::string submitted_at; // 原始提交时间（接受入队时采集），用于首次 AC 时间口径
+  // 协作式取消令牌：由 JudgeManager 为每个任务创建并在服务停止时置位。判题核心与
+  // 执行器据此停止启动新进程并终止正在运行的进程组。空指针表示不支持取消。
+  std::shared_ptr<CancellationToken> cancel;
 };
 
 // 判题任务调度器（SPEC JUDGE-09 / M3.1 架构图中的 JudgeManager）。
@@ -99,6 +104,12 @@ public:
   // 可重复调用；已接收任务的结果一定被投递，不会留下永久等待的 future。
   void shutdown();
 
+  // 仅通知取消：停止接收新任务，并取消所有已接收任务（正在执行的置位取消令牌、
+  // 等待队列中的任务会在被 worker 取出后立即看到取消）。不阻塞、不回收 worker，
+  // 供服务停止流程在等待 HTTP 处理线程结束之前先行调用，避免同步等待判题的 HTTP
+  // 线程与停止流程互相等待。可重复调用、幂等。
+  void cancel_all();
+
   int worker_count() const { return worker_count_; }
   std::size_t queue_capacity() const { return queue_capacity_; }
 
@@ -109,7 +120,9 @@ public:
 
 private:
   struct Item {
-    explicit Item(SubmissionTask t) : task(std::move(t)) {}
+    explicit Item(SubmissionTask t) : task(std::move(t)) {
+      task.cancel = std::make_shared<CancellationToken>();
+    }
     SubmissionTask task;
     std::promise<submit::SubmitService::Outcome> promise;
   };
@@ -123,6 +136,9 @@ private:
   mutable std::mutex mutex_;
   std::condition_variable not_empty_;
   std::deque<std::shared_ptr<Item>> queue_;
+  // 正在执行任务的原始指针集合（Item 由对应 worker 的 shared_ptr 保活，仅在锁内
+  // 访问）。服务停止时据此取消正在执行的子进程。
+  std::set<Item *> active_items_;
   bool stopped_ = false;
 
   std::atomic<std::size_t> active_{0};

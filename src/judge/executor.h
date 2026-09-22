@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "judge/deadline.h"
 #include "judge/status.h"
 
 namespace oj {
@@ -31,6 +32,7 @@ struct ProcessResult {
   std::string launch_error_message;
 
   bool timed_out = false; // 是否因超过时间限制被强制终止
+  bool cancelled = false; // 是否因服务停止被主动取消（非用户程序超时）
   bool exited = false;    // 是否被 waitpid 正常回收并取得退出状态
   int exit_code = 0;      // exited==true 且非信号终止时的退出码
   int term_signal = 0;    // 被信号终止时的信号编号（0 表示非信号终止）
@@ -53,8 +55,10 @@ struct CompileRequest {
   std::string output_path;      // 生成的可执行文件路径
   std::string working_directory; // 编译进程工作目录
   std::vector<std::string> extra_flags; // 预留：M3.4 接入 ASan/UBSan 等选项
-  int time_limit_ms = 10000;    // 编译保护超时
+  int time_limit_ms = 10000;    // 编译保护超时（可能已被剩余全局预算裁剪）
   std::size_t output_limit_bytes = 64 * 1024; // 诊断信息采集上限
+  // 非空时，执行器在编译过程中轮询该令牌，服务停止时尽快终止编译器进程组。
+  const CancellationToken *cancel = nullptr;
 };
 
 // 单个测试点的运行请求。每个测试点都必须启动新的进程。
@@ -64,6 +68,8 @@ struct RunRequest {
   int time_limit_ms = 2000;
   std::size_t stdout_limit_bytes = 64 * 1024;
   std::size_t stderr_limit_bytes = 16 * 1024;
+  // 非空时，执行器在运行过程中轮询该令牌，服务停止时尽快终止程序进程组。
+  const CancellationToken *cancel = nullptr;
 };
 
 // 进程执行抽象接口。将「如何编译/运行子进程」与「如何比对、汇总」解耦：
