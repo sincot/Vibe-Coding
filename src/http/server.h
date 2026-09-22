@@ -17,6 +17,7 @@
 #include "auth/register.h"
 #include "db/problem_admin.h"
 #include "db/problems.h"
+#include "db/testcase_admin.h"
 #include "db/users.h"
 #include "judge/executor.h"
 #include "judge/judge.h"
@@ -88,6 +89,14 @@ private:
                                    httplib::Response &res);
   void handle_admin_delete_problem(const httplib::Request &req,
                                    httplib::Response &res);
+  void handle_admin_list_testcases(const httplib::Request &req,
+                                   httplib::Response &res);
+  void handle_admin_create_testcase(const httplib::Request &req,
+                                    httplib::Response &res);
+  void handle_admin_update_testcase(const httplib::Request &req,
+                                    httplib::Response &res);
+  void handle_admin_delete_testcase(const httplib::Request &req,
+                                    httplib::Response &res);
   void handle_test_admin_only(const httplib::Request &req,
                               httplib::Response &res);
 
@@ -110,6 +119,7 @@ private:
   UserStore user_store_;
   ProblemStore problem_store_;
   ProblemAdminStore problem_admin_store_;
+  TestcaseAdminStore testcase_admin_store_;
   auth::RateLimiter rate_limiter_;
   auth::RandomAccountGenerator account_gen_;
   auth::RegisterService register_service_;

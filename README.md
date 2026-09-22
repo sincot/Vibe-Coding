@@ -16,8 +16,9 @@
 - [x] M1.6 提交接口与持久化（`POST /api/problems/{id}/submit`：登录/首改/可见性校验 + 后端隐藏用例判题 + 单事务写入 `submissions` 与 `user_problem_status` + 同步返回逐点结果）
 - [x] M1.7 最小前端（cpp-httplib 静态托管 `web/` + 原生 HTML/CSS/ES Module + hash 路由 + 注册/登录/改密/题目列表/题目页 `textarea` 提交 + 统一 API 封装；仅开发环境验证）
 - [x] M2.1 管理员题目接口（`POST`/`PUT`/`DELETE /api/admin/problems`：字段校验与默认值 + 部分更新语义 + 可见性设置 + 删除关联数据规则 + 统一管理员权限检查）
+- [x] M2.2 管理员测试用例接口（`GET`/`POST`/`PUT`/`DELETE /api/admin/problems/{id}/testcases[/{tid}]`：隐藏用例读/增/改/删 + 归属与权限校验 + `ord` 排序规则 + 公开样例隔离 + 判题快照与历史数据不受影响）
 
-后续阶段（管理员测试用例接口、题目搜索筛选分页、用户管理、后台页面、Rejudge、完整沙箱与判题线程池、CodeMirror）尚未实现。
+后续阶段（题目搜索筛选分页、用户管理、后台页面、Rejudge、完整沙箱与判题线程池、CodeMirror）尚未实现。
 
 ## 环境要求
 
@@ -589,6 +590,131 @@ curl -i -X DELETE http://127.0.0.1:8080/api/admin/problems/4 \
 > 可见性说明：管理员可将其设为隐藏并仍能在列表/详情中查看；游客与普通用户列表不含
 > 隐藏题、直接访问详情或发起新提交均被拒（`404`）。可见性变化不会清除已有提交与做题
 > 状态，也不重判历史提交（Rejudge 见 M3.6）。
+
+### 管理员测试用例接口（M2.2）
+
+四个接口均需管理员权限（已登录 + 已完成首次改密 + 当前数据库角色为 `admin`），角色与
+首次改密标记每次按 `sub` 回查数据库。游客/无效 token 返回 `401`；普通用户返回 `403`；
+未完成首次改密的管理员返回 `403` + `code:"PASSWORD_CHANGE_REQUIRED"`。普通用户即使知道
+题目 ID 或用例 ID，也无法读取完整用例或执行修改。
+
+**存储模型（公开样例 vs 隐藏用例）**：公开样例与隐藏用例共用 `testcases` 表，用
+`is_sample` 显式区分：`1` = 公开样例，`0` = 隐藏用例。
+
+- 公开样例由 M2.1 的题目接口通过 `samples` 字段整体维护；本组接口**只读写
+  `is_sample=0`**，从不读取或改写 `is_sample`，因此新增、修改、排序都不可能把隐藏
+  用例变成公开样例，也不会破坏公开样例。
+- 通过用例接口修改/删除公开样例（或不属于该题的用例）一律返回 `404`，公开样例保持
+  不变。
+- 公开题目列表与详情仍只返回公开样例；管理员读取接口是唯一返回完整用例的入口，
+  且受管理员权限保护，不复用于公开响应。
+
+**管理员读取用例**：`GET /api/admin/problems/{id}/testcases` 返回该题**完整用例列表**
+（含公开样例与隐藏用例，带 `is_sample` 标记），按 `(ord ASC, id ASC)` 排序，与判题器
+执行顺序一致。题目不存在返回 `404`。
+
+```bash
+curl -i http://127.0.0.1:8080/api/admin/problems/4/testcases \
+  -H 'Authorization: Bearer <admin-token>'
+```
+
+成功响应（`200`）：
+
+```
+{"problem_id":4,"total":3,"testcases":[
+  {"id":9,"problem_id":4,"ord":0,"input":"1 2\n","output":"3\n","is_sample":true},
+  {"id":10,"problem_id":4,"ord":1,"input":"5 7\n","output":"12\n","is_sample":false}
+]}
+```
+
+**新增用例**：`POST /api/admin/problems/{id}/testcases`。用例归属只由 URL 中的题目 ID
+决定，请求体中的 `id`/`problem_id`/`is_sample` 等字段一律忽略；新增记录固定为隐藏用例
+（`is_sample=0`）。成功返回 `201` + 新用例 ID 与实际保存的 `ord`。
+
+```bash
+curl -i -X POST http://127.0.0.1:8080/api/admin/problems/4/testcases \
+  -H 'Authorization: Bearer <admin-token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"input":"111 222\n","output":"333\n","ord":5}'
+```
+
+成功响应（`201`）：
+
+```
+{"id":11,"problem_id":4,"ord":5}
+```
+
+**修改用例**：`PUT /api/admin/problems/{id}/testcases/{tid}`。采用**部分更新**：只更新
+请求体中出现的字段，未出现的字段保持原值；需要清空时显式传空串（如 `"input":""`）——
+空串是合法内容，和「字段缺失」语义不同。用例按 `problem_id` 与用例 ID 同时定位；
+不存在、不属于该题或属于公开样例时统一返回 `404`，不会修改其它题目的用例。
+
+```bash
+curl -i -X PUT http://127.0.0.1:8080/api/admin/problems/4/testcases/11 \
+  -H 'Authorization: Bearer <admin-token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"output":"334\n"}'
+```
+
+成功响应（`200`）：
+
+```
+{"id":11,"problem_id":4,"ord":5,"status":"ok"}
+```
+
+**删除用例**：`DELETE /api/admin/problems/{id}/testcases/{tid}`。同样以题目 ID 与用例 ID
+同时定位；不存在/不属于该题/公开样例返回 `404`。删除**不重排、不回收空号**，其余用例
+`ord` 保持不变。
+
+```bash
+curl -i -X DELETE http://127.0.0.1:8080/api/admin/problems/4/testcases/11 \
+  -H 'Authorization: Bearer <admin-token>'
+```
+
+成功响应（`200`）：
+
+```
+{"status":"ok"}
+```
+
+字段规则：
+
+| 字段 | 类型 | 必填 | 规则 |
+|---|---|---|---|
+| `input` | string | 是（新增）/ 否（修改） | 纯文本，≤ 64 KiB；允许空串；不 trim、不归一化，原样保存 |
+| `output` | string | 是（新增）/ 否（修改） | 同上 |
+| `ord` | integer | 否 | `0..1000000`，默认见下 |
+
+`ord` 规则（沿用既有约定）：
+
+- 起始值 `0`；允许重复；同一题内顺序由 `(ord ASC, id ASC)` 唯一确定，`id` 为稳定
+  第二排序键，不依赖数据库默认行顺序。数据库读取、管理员列表与判题执行使用同一排序。
+- 新增时缺省 `ord` = 该题全部用例（含公开样例）当前最大 `ord` + 1，无用例时为 `0`
+  （即追加到末尾）；若该题 `ord` 已达上限（`1000000`），自动分配无法满足范围时返回
+  `409`，需显式指定未占用的 `ord`。
+- 删除不重排、不回收空号；修改 `ord` 仅改变该条记录的排序位置。
+
+错误约定：
+
+| 状态码 | 含义 |
+|---|---|
+| `201` / `200` | 新增成功 / 读取、修改、删除成功 |
+| `400` | 非法参数：非法 JSON、缺少必填字段、类型错误、文本超长、`ord` 越界、无可更新字段、非法题目/用例 ID |
+| `401` | 未登录 / 无效 token |
+| `403` | 非管理员；或管理员未完成首次改密（含 `code:"PASSWORD_CHANGE_REQUIRED"`） |
+| `404` | 题目不存在；或用例不存在 / 不属于该题 / 属于公开样例 |
+| `409` | 约束冲突：该题 `ord` 已达上限，缺省追加无法自动分配 |
+| `413` | 请求体超过 1 MiB（由服务器在解析前拒绝） |
+| `500` | 内部故障（不泄露 SQL/路径/隐藏用例内容） |
+
+对判题与历史数据的影响：
+
+- 一次提交在判题前读取完整用例并构造内存快照，判题全程使用该快照；判题期间修改用例
+  不会让同一次判题混用修改前后的版本。后续提交使用修改后的用例。
+- 新增/修改/删除用例**不重判历史提交**，不更改已保存的逐点结果、AC 状态与提交次数
+  （Rejudge 见 M3.6）。
+- 管理员可暂时删空某题用例以便编辑；空测试集**不判 AC**，提交时返回约定的 `SYSERR`
+  （不可判题）并正常持久化为提交记录。删题规则仍沿用 M2.1（有提交记录时拒绝删除）。
 
 ### 提交接口（M1.6）
 

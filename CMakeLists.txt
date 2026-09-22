@@ -78,9 +78,11 @@ add_library(oj_core STATIC
   src/db/users.cpp
   src/db/problems.cpp
   src/db/problem_admin.cpp
+  src/db/testcase_admin.cpp
   src/db/submissions.cpp
   src/db/seed.cpp
   src/problem/validation.cpp
+  src/problem/testcase_validation.cpp
   src/auth/password.cpp
   src/auth/account.cpp
   src/auth/validation.cpp
@@ -353,3 +355,24 @@ add_executable(oj_admin_problems_api_test
 target_link_libraries(oj_admin_problems_api_test PRIVATE oj_core)
 
 add_test(NAME admin_problems_api COMMAND oj_admin_problems_api_test)
+
+# M2.2 管理员测试用例写入字段校验与 ord 规则单元测试（gtest）：创建/部分更新的
+# 字段校验（必填、类型、空串与缺失区分、长度、ord 范围）。
+add_executable(oj_testcase_admin_unit
+  tests/unit/test_testcase_admin_unit.cpp
+)
+
+target_link_libraries(oj_testcase_admin_unit PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME testcase_admin_unit COMMAND oj_testcase_admin_unit)
+
+# M2.2 管理员测试用例接口集成测试（隔离临时库 + 随机端口真实 HTTP + 可注入执行器）：
+# 读/增/改/删的权限、字段与归属校验、ord 规则与判题执行顺序一致、公开样例与隐藏
+# 用例隔离、空测试集不判 AC、修改对新旧提交的影响、并发删除与重启持久化。
+add_executable(oj_admin_testcases_api_test
+  tests/integration/test_admin_testcases_api.cpp
+)
+
+target_link_libraries(oj_admin_testcases_api_test PRIVATE oj_core)
+
+add_test(NAME admin_testcases_api COMMAND oj_admin_testcases_api_test)

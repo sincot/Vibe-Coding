@@ -11,6 +11,7 @@
 #include "auth/validation.h"
 #include "judge/local_executor.h"
 #include "log.h"
+#include "problem/testcase_validation.h"
 #include "problem/validation.h"
 
 namespace oj {
@@ -220,6 +221,20 @@ json problem_detail_json(const ProblemRecord &problem,
   return j;
 }
 
+// 管理员用例 JSON：包含编辑所需字段（用例 ID、题目归属、ord、输入、期望输出）以及
+// is_sample 标记，供后台区分公开样例与隐藏用例。仅用于受管理员权限保护的管理接口，
+// 绝不用于公开题目列表/详情。
+json admin_testcase_json(const TestcaseRecord &tc, std::int64_t problem_id) {
+  json j;
+  j["id"] = tc.id;
+  j["problem_id"] = problem_id;
+  j["ord"] = tc.ord;
+  j["input"] = tc.input;
+  j["output"] = tc.output;
+  j["is_sample"] = tc.is_sample;
+  return j;
+}
+
 } // namespace
 
 HttpServer::HttpServer(std::string host, int port, Database &db,
@@ -233,6 +248,7 @@ HttpServer::HttpServer(std::string host, int port, Database &db,
       user_store_(db),
       problem_store_(db),
       problem_admin_store_(db),
+      testcase_admin_store_(db),
       rate_limiter_(auth::RateLimiter::Config{}),
       account_gen_(),
       register_service_(db, account_gen_),
@@ -338,6 +354,26 @@ void HttpServer::setup_routes() {
   svr_.Delete(R"(/api/admin/problems/([^/]+))",
               [this](const httplib::Request &req, httplib::Response &res) {
                 handle_admin_delete_problem(req, res);
+              });
+
+  // 管理员测试用例接口（M2.2）：读/增/改/删某题的隐藏测试用例。均统一走
+  // require_admin；公开样例由 M2.1 的题目接口维护，这里只操作 is_sample=0。
+  // 具体子路径使用完整匹配的正则，不会与上面的 /api/admin/problems/{id} 混淆。
+  svr_.Get(R"(/api/admin/problems/([^/]+)/testcases)",
+           [this](const httplib::Request &req, httplib::Response &res) {
+             handle_admin_list_testcases(req, res);
+           });
+  svr_.Post(R"(/api/admin/problems/([^/]+)/testcases)",
+            [this](const httplib::Request &req, httplib::Response &res) {
+              handle_admin_create_testcase(req, res);
+            });
+  svr_.Put(R"(/api/admin/problems/([^/]+)/testcases/([^/]+))",
+           [this](const httplib::Request &req, httplib::Response &res) {
+             handle_admin_update_testcase(req, res);
+           });
+  svr_.Delete(R"(/api/admin/problems/([^/]+)/testcases/([^/]+))",
+              [this](const httplib::Request &req, httplib::Response &res) {
+                handle_admin_delete_testcase(req, res);
               });
 
   // 测试专用路由：仅 enable_test_routes_ 为 true（集成测试）时注册，
@@ -917,6 +953,209 @@ void HttpServer::handle_admin_delete_problem(const httplib::Request &req,
       return;
     case ProblemAdminStore::DeleteStatus::Error:
       log(LogLevel::Error, "删除题目失败: " + err);
+      send_error(res, 500, "内部错误");
+      return;
+  }
+}
+
+void HttpServer::handle_admin_list_testcases(const httplib::Request &req,
+                                             httplib::Response &res) {
+  auth::AuthUser admin;
+  if (!require_admin(req, res, admin)) {
+    return;
+  }
+
+  std::int64_t problem_id = 0;
+  if (req.matches.size() < 2 ||
+      !parse_problem_id(req.matches[1].str(), problem_id)) {
+    send_error(res, 400, "非法题目 ID");
+    return;
+  }
+
+  bool found = false;
+  ProblemRecord problem;
+  std::string err;
+  if (!problem_store_.find_by_id(problem_id, found, problem, err)) {
+    log(LogLevel::Error, "管理员用例读取：题目查询失败: " + err);
+    send_error(res, 500, "内部错误");
+    return;
+  }
+  if (!found) {
+    send_error(res, 404, "题目不存在");
+    return;
+  }
+
+  std::vector<TestcaseRecord> records;
+  if (!problem_store_.list_testcases(problem_id, records, err)) {
+    log(LogLevel::Error, "管理员用例读取失败: " + err);
+    send_error(res, 500, "内部错误");
+    return;
+  }
+
+  const std::size_t total = records.size();
+  json list = json::array();
+  for (const TestcaseRecord &tc : records) {
+    list.push_back(admin_testcase_json(tc, problem_id));
+  }
+  json body;
+  body["problem_id"] = problem_id;
+  body["testcases"] = std::move(list);
+  body["total"] = total;
+  send_json(res, 200, body);
+}
+
+void HttpServer::handle_admin_create_testcase(const httplib::Request &req,
+                                              httplib::Response &res) {
+  auth::AuthUser admin;
+  if (!require_admin(req, res, admin)) {
+    return;
+  }
+
+  std::int64_t problem_id = 0;
+  if (req.matches.size() < 2 ||
+      !parse_problem_id(req.matches[1].str(), problem_id)) {
+    send_error(res, 400, "非法题目 ID");
+    return;
+  }
+
+  json body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception &) {
+    send_error(res, 400, "请求体不是合法的 JSON");
+    return;
+  }
+
+  // 只读取 input/output/ord；id/problem_id/is_sample 等由服务端管理，客户端传入
+  // 一律忽略，用例归属只由 URL 中的题目 ID 决定。
+  problem::TestcaseData data;
+  std::string validation_error;
+  if (!problem::parse_create_testcase(body, data, validation_error)) {
+    send_error(res, 400, validation_error);
+    return;
+  }
+
+  std::int64_t new_id = 0;
+  int ord = 0;
+  std::string err;
+  switch (testcase_admin_store_.create(problem_id, data, new_id, ord, err)) {
+    case TestcaseAdminStore::CreateStatus::Created: {
+      log(LogLevel::Info, "管理员 " + std::to_string(admin.id) +
+                              " 为题目 #" + std::to_string(problem_id) +
+                              " 新增用例 #" + std::to_string(new_id));
+      json resp;
+      resp["id"] = new_id;
+      resp["problem_id"] = problem_id;
+      resp["ord"] = ord;
+      send_json(res, 201, resp);
+      return;
+    }
+    case TestcaseAdminStore::CreateStatus::ProblemNotFound:
+      send_error(res, 404, "题目不存在");
+      return;
+    case TestcaseAdminStore::CreateStatus::OrdExhausted:
+      send_error(res, 409, "自动分配 ord 已达上限，请显式指定 ord");
+      return;
+    case TestcaseAdminStore::CreateStatus::Error:
+      log(LogLevel::Error, "新增用例失败: " + err);
+      send_error(res, 500, "内部错误");
+      return;
+  }
+}
+
+void HttpServer::handle_admin_update_testcase(const httplib::Request &req,
+                                              httplib::Response &res) {
+  auth::AuthUser admin;
+  if (!require_admin(req, res, admin)) {
+    return;
+  }
+
+  std::int64_t problem_id = 0;
+  std::int64_t testcase_id = 0;
+  if (req.matches.size() < 3 ||
+      !parse_problem_id(req.matches[1].str(), problem_id)) {
+    send_error(res, 400, "非法题目 ID");
+    return;
+  }
+  if (!parse_problem_id(req.matches[2].str(), testcase_id)) {
+    send_error(res, 400, "非法用例 ID");
+    return;
+  }
+
+  json body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception &) {
+    send_error(res, 400, "请求体不是合法的 JSON");
+    return;
+  }
+
+  // 部分更新语义：仅更新请求体中出现的字段，未出现的字段保持原值；显式空串可清空。
+  problem::TestcasePatch patch;
+  std::string validation_error;
+  if (!problem::parse_update_testcase(body, patch, validation_error)) {
+    send_error(res, 400, validation_error);
+    return;
+  }
+
+  int ord = 0;
+  std::string err;
+  switch (testcase_admin_store_.update(problem_id, testcase_id, patch, ord,
+                                       err)) {
+    case TestcaseAdminStore::UpdateStatus::Updated: {
+      json resp;
+      resp["id"] = testcase_id;
+      resp["problem_id"] = problem_id;
+      resp["ord"] = ord;
+      resp["status"] = "ok";
+      send_json(res, 200, resp);
+      return;
+    }
+    case TestcaseAdminStore::UpdateStatus::NotFound:
+      send_error(res, 404, "用例不存在");
+      return;
+    case TestcaseAdminStore::UpdateStatus::Error:
+      log(LogLevel::Error, "修改用例失败: " + err);
+      send_error(res, 500, "内部错误");
+      return;
+  }
+}
+
+void HttpServer::handle_admin_delete_testcase(const httplib::Request &req,
+                                              httplib::Response &res) {
+  auth::AuthUser admin;
+  if (!require_admin(req, res, admin)) {
+    return;
+  }
+
+  std::int64_t problem_id = 0;
+  std::int64_t testcase_id = 0;
+  if (req.matches.size() < 3 ||
+      !parse_problem_id(req.matches[1].str(), problem_id)) {
+    send_error(res, 400, "非法题目 ID");
+    return;
+  }
+  if (!parse_problem_id(req.matches[2].str(), testcase_id)) {
+    send_error(res, 400, "非法用例 ID");
+    return;
+  }
+
+  std::string err;
+  switch (testcase_admin_store_.remove(problem_id, testcase_id, err)) {
+    case TestcaseAdminStore::DeleteStatus::Deleted: {
+      log(LogLevel::Info, "管理员 " + std::to_string(admin.id) +
+                              " 删除题目 #" + std::to_string(problem_id) +
+                              " 的用例 #" + std::to_string(testcase_id));
+      json resp;
+      resp["status"] = "ok";
+      send_json(res, 200, resp);
+      return;
+    }
+    case TestcaseAdminStore::DeleteStatus::NotFound:
+      send_error(res, 404, "用例不存在");
+      return;
+    case TestcaseAdminStore::DeleteStatus::Error:
+      log(LogLevel::Error, "删除用例失败: " + err);
       send_error(res, 500, "内部错误");
       return;
   }
