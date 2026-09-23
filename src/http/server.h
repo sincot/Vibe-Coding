@@ -163,6 +163,8 @@ private:
   httplib::Server svr_;
   std::thread listen_thread_;
   std::atomic<bool> running_{false};
+  // 停止收尾日志只输出一次：stop() 可被显式调用与析构重复调用，避免重复刷屏。
+  std::atomic<bool> stop_finished_logged_{false};
 };
 
 } // namespace oj

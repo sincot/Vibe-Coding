@@ -33,6 +33,9 @@ int compute_worker_count(int cpu_count_override);
 // 一次提交对应的调度任务。任务自带全部数据，绝不引用 HTTP 请求对象、回调局部变量
 // 或数据库语句对象，因此可在 worker 线程中安全、独立地执行。
 struct SubmissionTask {
+  // 判题任务标识：由 JudgeManager 在接收时分配（调用方留 0 即可），用于把
+  // 「接收/开始/完成/取消/清理失败」的日志与同一任务关联起来，便于停止排障。
+  std::int64_t task_id = 0;
   std::int64_t user_id = 0;
   std::int64_t problem_id = 0;
   std::string language;    // 规范语言名："cpp17" / "c11"
@@ -118,6 +121,12 @@ public:
   // 当前等待执行的任务数（<= queue_capacity）。
   std::size_t queued_count() const;
 
+  // 已接收（Accepted）与已完成（handler 返回）的累计任务数。正常情况下两者在
+  // shutdown() 返回后相等；若不等则说明存在未收尾的已接收任务，停止流程会据此
+  // 留下明确证据，而不是宣称全部已保存。
+  std::int64_t accepted_count() const { return accepted_.load(); }
+  std::int64_t completed_count() const { return completed_.load(); }
+
 private:
   struct Item {
     explicit Item(SubmissionTask t) : task(std::move(t)) {
@@ -142,6 +151,10 @@ private:
   bool stopped_ = false;
 
   std::atomic<std::size_t> active_{0};
+  // 任务标识分配器与「已接收 / 已完成」计数，用于日志关联与停止收尾核对。
+  std::atomic<std::int64_t> next_task_id_{1};
+  std::atomic<std::int64_t> accepted_{0};
+  std::atomic<std::int64_t> completed_{0};
 
   std::mutex shutdown_mutex_;
   bool workers_joined_ = false;

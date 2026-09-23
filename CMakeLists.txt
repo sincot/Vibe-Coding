@@ -501,3 +501,25 @@ add_executable(oj_admin_users_api_test
 target_link_libraries(oj_admin_users_api_test PRIVATE oj_core)
 
 add_test(NAME admin_users_api COMMAND oj_admin_users_api_test)
+
+# M3.5 停止清理单元测试（gtest）：Workspace 清理失败可定位、可重复收尾、不误删他人
+# 目录（不启动判题进程、不触碰数据库）。
+add_executable(oj_m35_cleanup_unit
+  tests/unit/test_m35_cleanup_unit.cpp
+)
+
+target_link_libraries(oj_m35_cleanup_unit PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME m35_cleanup_unit COMMAND oj_m35_cleanup_unit)
+
+# M3.5 持久化与停止清理集成测试（隔离临时库 + 随机端口 + 受控执行器/同步门 +
+# 故障注入）：完整结果关闭重开可读、事务回滚、数据库锁竞争有界、完成/取消竞争
+# 只最终处理一次、客户端断开不丢结果、各阶段停止与新提交拒绝、重复停止幂等、
+# 无遗留进程/目录、失败路径无资源持续增长、停止重启后数据一致且可继续判题。
+add_executable(oj_m35_persistence_shutdown_test
+  tests/integration/test_m35_persistence_shutdown.cpp
+)
+
+target_link_libraries(oj_m35_persistence_shutdown_test PRIVATE oj_core)
+
+add_test(NAME m35_persistence_shutdown COMMAND oj_m35_persistence_shutdown_test)

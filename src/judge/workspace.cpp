@@ -7,6 +7,8 @@
 #include <system_error>
 #include <vector>
 
+#include "log.h"
+
 namespace oj {
 namespace judge {
 
@@ -30,21 +32,41 @@ void Workspace::cleanup() noexcept {
         fs::weakly_canonical(fs::path(path_).parent_path(), parent_ec);
     const fs::path expected = fs::weakly_canonical(fs::path(base_), base_ec);
     if (parent_ec || base_ec || parent != expected) {
+      // 路径越界或被替换：绝不清理，留下明确证据供排查（不误删其它任务资源）。
+      log(LogLevel::Warn,
+          "跳过判题工作目录清理（路径越界或无法确认归属）: " + path_);
       return;
     }
   }
 
   const fs::file_status status = fs::symlink_status(path_, ec);
   if (ec) {
-    return; // 路径不存在或无法读取：无需清理
+    // 目录已不存在属正常可重复收尾场景；其它读取失败才记录，避免吞掉真实问题。
+    std::error_code exists_ec;
+    if (!fs::exists(path_, exists_ec)) {
+      return;
+    }
+    log(LogLevel::Warn,
+        "判题工作目录清理无法读取状态: " + path_ + "（" + ec.message() + "）");
+    return;
   }
   if (fs::is_symlink(status)) {
     // 路径被替换为符号链接：只删除链接本身，绝不跟随删除其目标。
     fs::remove(path_, ec);
+    if (ec) {
+      log(LogLevel::Error, "删除判题目录符号链接失败: " + path_ + "（" +
+                               ec.message() + "）");
+    }
     return;
   }
   if (fs::is_directory(status)) {
+    ec.clear();
     fs::remove_all(path_, ec);
+    if (ec) {
+      // 真实清理失败：保留现场并记录原因，不吞掉异常后报告成功。
+      log(LogLevel::Error, "判题工作目录清理失败（资源保留待排查）: " + path_ +
+                               "（" + ec.message() + "）");
+    }
   }
 }
 

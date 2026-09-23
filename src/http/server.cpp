@@ -2,6 +2,7 @@
 
 #include <sys/socket.h>
 
+#include <chrono>
 #include <filesystem>
 #include <utility>
 
@@ -364,10 +365,14 @@ bool HttpServer::start(std::string &error) {
 
 void HttpServer::stop() {
   if (running_.exchange(false)) {
-    // 先通知判题调度器取消：正在执行的判题任务尽快终止子进程，等待队列中的任务
-    // 在取出后短路、不再启动新进程。必须在 svr_.stop() 之前完成，否则 cpp-httplib
-    // 会等待仍在同步等待判题结果的 HTTP 处理线程，而停止流程又在等 HTTP 线程结束，
-    // 造成不必要的长时间等待。
+    // 停止顺序（避免 HTTP 线程与判题器互相等待）：
+    //   1) 先通知判题调度器取消：正在执行的判题任务尽快终止子进程，等待队列中的任务
+    //      在取出后短路、不再启动新进程；cancel_all 只置位、不阻塞。
+    //   2) 再 svr_.stop() 停止监听并等待 HTTP 处理线程结束。此时同步等待判题结果的
+    //      请求会随各任务交付结果而返回，不会与停止流程互相等待。
+    //   （若先 svr_.stop()，cpp-httplib 会等待仍在同步等待判题结果的 HTTP 处理线程，
+    //    而判题器又在等待停止流程，造成不必要的长时间等待。）
+    log(LogLevel::Info, "HTTP 服务开始停止：先取消判题调度，再停止监听");
     if (judge_manager_) {
       judge_manager_->cancel_all();
     }
@@ -377,12 +382,38 @@ void HttpServer::stop() {
     }
   }
   // HTTP 处理线程（含正在同步等待判题结果的请求）此时已全部结束；再停止判题
-  // 调度器并回收 worker，保证随后关闭数据库时没有 worker 仍在使用数据库。
-  // 已接收任务的结果（含取消产生的 SYSERR）都在 join 之前持久化，数据库保持可用。
-  // 幂等：可重复调用。
+  // 调度器并回收 worker，保证随后关闭数据库时没有 worker 仍在使用数据库。已接收
+  // 任务的结果（含取消产生的 SYSERR）都在 join 之前持久化，数据库保持可用。
+  // 停止等待预算：取消是协作式的（执行器约每 20ms 轮询），正常情况下应在数秒内
+  // 完成；单次判题仍有全局 60s 硬上限兜底，不会无限等待。超过预算仅记录告警，不
+  // 强制杀死线程（避免破坏数据库/文件系统一致性），也不宣称已保存全部结果。
   if (judge_manager_) {
+    const auto start = std::chrono::steady_clock::now();
     judge_manager_->shutdown();
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start)
+            .count();
+    if (!stop_finished_logged_.exchange(true)) {
+      constexpr long long kStopWaitBudgetMs = 30000;
+      if (elapsed_ms > kStopWaitBudgetMs) {
+        log(LogLevel::Warn,
+            "判题调度器停止耗时 " + std::to_string(elapsed_ms) +
+                " ms，超出预算 " + std::to_string(kStopWaitBudgetMs) +
+                " ms（已接收 " +
+                std::to_string(judge_manager_->accepted_count()) + "，已完成 " +
+                std::to_string(judge_manager_->completed_count()) + "）");
+      } else {
+        log(LogLevel::Info, "判题调度器已停止并回收 worker（耗时 " +
+                                std::to_string(elapsed_ms) + " ms，已接收 " +
+                                std::to_string(judge_manager_->accepted_count()) +
+                                "，已完成 " +
+                                std::to_string(judge_manager_->completed_count()) +
+                                "）");
+      }
+    }
   }
+  // 幂等：可重复调用。
 }
 
 bool HttpServer::is_running() const {

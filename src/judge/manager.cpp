@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <utility>
 
+#include "log.h"
+
 namespace oj {
 namespace judge {
 
@@ -14,6 +16,18 @@ submit::SubmitService::Outcome make_internal_error(const std::string &message) {
   outcome.kind = submit::SubmitService::Kind::InternalError;
   outcome.error = message;
   return outcome;
+}
+
+const char *outcome_kind_name(submit::SubmitService::Kind kind) {
+  switch (kind) {
+  case submit::SubmitService::Kind::Ok:
+    return "Ok";
+  case submit::SubmitService::Kind::ProblemNotFound:
+    return "ProblemNotFound";
+  case submit::SubmitService::Kind::InternalError:
+    return "InternalError";
+  }
+  return "Unknown";
 }
 
 } // namespace
@@ -59,24 +73,39 @@ JudgeManager::~JudgeManager() { shutdown(); }
 
 JudgeManager::SubmitResult JudgeManager::submit(SubmissionTask task) {
   SubmitResult result;
+  // 分配（或沿用调用方显式提供的）任务标识：所有后续日志都带该标识，便于把同一
+  // 任务的接收、执行、完成、取消与清理问题串起来定位。
+  if (task.task_id == 0) {
+    task.task_id = next_task_id_.fetch_add(1);
+  }
+  const std::int64_t task_id = task.task_id;
+  const std::int64_t task_user_id = task.user_id;
+  const std::int64_t task_problem_id = task.problem_id;
   auto item = std::make_shared<Item>(std::move(task));
 
   // 入队判断与入队操作在同一把锁内完成：并发提交也无法突破容量上限。
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (stopped_) {
-    result.status = EnqueueStatus::Stopped;
-    return result;
-  }
-  if (queue_.size() >= queue_capacity_) {
-    result.status = EnqueueStatus::QueueFull;
-    return result;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (stopped_) {
+      result.status = EnqueueStatus::Stopped;
+      return result;
+    }
+    if (queue_.size() >= queue_capacity_) {
+      result.status = EnqueueStatus::QueueFull;
+      return result;
+    }
+
+    // 必须在任务入队（可能被 worker 立即取走并完成）之前取得 future，避免错过结果。
+    result.future = item->promise.get_future();
+    queue_.push_back(std::move(item));
+    not_empty_.notify_one();
+    result.status = EnqueueStatus::Accepted;
   }
 
-  // 必须在任务入队（可能被 worker 立即取走并完成）之前取得 future，避免错过结果。
-  result.future = item->promise.get_future();
-  queue_.push_back(std::move(item));
-  not_empty_.notify_one();
-  result.status = EnqueueStatus::Accepted;
+  accepted_.fetch_add(1);
+  log(LogLevel::Info, "判题任务 #" + std::to_string(task_id) + " 已接收（用户 " +
+                          std::to_string(task_user_id) + "，题目 " +
+                          std::to_string(task_problem_id) + "）");
   return result;
 }
 
@@ -86,21 +115,31 @@ std::size_t JudgeManager::queued_count() const {
 }
 
 void JudgeManager::cancel_all() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  stopped_ = true;
-  // 正在执行与等待执行的任务都置位取消令牌：正在运行的任务据此终止子进程，等待中
-  // 的任务在被取出后立即短路（不启动新进程）。所有已接收任务仍会得到一个明确结果。
-  for (const std::shared_ptr<Item> &item : queue_) {
-    if (item->task.cancel) {
-      item->task.cancel->cancel();
+  std::vector<std::int64_t> cancelled_ids;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stopped_ = true;
+    // 正在执行与等待执行的任务都置位取消令牌：正在运行的任务据此终止子进程，等待中
+    // 的任务在被取出后立即短路（不启动新进程）。所有已接收任务仍会得到一个明确结果。
+    // 只在首次置位时记录日志，重复 cancel_all（含并发停止）不会重复刷屏。
+    auto cancel_item = [&cancelled_ids](Item *item) {
+      if (item->task.cancel && !item->task.cancel->cancelled()) {
+        item->task.cancel->cancel();
+        cancelled_ids.push_back(item->task.task_id);
+      }
+    };
+    for (const std::shared_ptr<Item> &item : queue_) {
+      cancel_item(item.get());
     }
-  }
-  for (Item *item : active_items_) {
-    if (item->task.cancel) {
-      item->task.cancel->cancel();
+    for (Item *item : active_items_) {
+      cancel_item(item);
     }
+    not_empty_.notify_all();
   }
-  not_empty_.notify_all();
+  for (std::int64_t id : cancelled_ids) {
+    log(LogLevel::Info,
+        "判题任务 #" + std::to_string(id) + " 收到取消（停止/取消流程）");
+  }
 }
 
 void JudgeManager::shutdown() {
@@ -120,6 +159,19 @@ void JudgeManager::shutdown() {
     }
   }
   workers_joined_ = true;
+
+  // 核对责任归属：正常情况下所有已接收任务都已执行完 handler（持久化在 handler 内
+  // 完成），据此留下明确证据，而不是无条件宣称「全部已保存」。
+  const std::int64_t accepted = accepted_.load();
+  const std::int64_t completed = completed_.load();
+  if (accepted == completed) {
+    log(LogLevel::Info, "判题调度器已排空：已接收 " + std::to_string(accepted) +
+                            " 个任务，全部执行并持久化完成");
+  } else {
+    log(LogLevel::Error, "判题调度器停止后仍有未完成任务：已接收 " +
+                             std::to_string(accepted) + "，已完成 " +
+                             std::to_string(completed));
+  }
 }
 
 void JudgeManager::worker_loop() {
@@ -140,6 +192,8 @@ void JudgeManager::worker_loop() {
     }
 
     active_.fetch_add(1);
+    const std::int64_t task_id = item->task.task_id;
+    log(LogLevel::Info, "判题任务 #" + std::to_string(task_id) + " 开始执行");
     submit::SubmitService::Outcome outcome;
     try {
       outcome = handler_(item->task);
@@ -149,6 +203,16 @@ void JudgeManager::worker_loop() {
     } catch (...) {
       outcome = make_internal_error("判题任务异常");
     }
+    completed_.fetch_add(1);
+
+    // handler 返回即代表该任务的「最终处理 + 持久化」已结束（责任归属明确）。在把
+    // 结果移入 promise 之前记录任务标识与结果类型，不重复输出源码或逐点详情。
+    const std::string verdict =
+        (outcome.kind == submit::SubmitService::Kind::Ok)
+            ? outcome.submission.status
+            : std::string(outcome_kind_name(outcome.kind));
+    log(LogLevel::Info, "判题任务 #" + std::to_string(task_id) +
+                            " 执行完成：" + verdict);
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
