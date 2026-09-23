@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <string>
 
+#include <nlohmann/json.hpp>
+
 #include "db/problems.h"
 #include "db/submissions.h"
 #include "judge/executor.h"
@@ -31,6 +33,11 @@ bool parse_submission_language(const std::string &text, std::string &canonical);
 // 校验源码：非空白且字节数不超过 kMaxSourceBytes。仅做校验，绝不修改源码内容。
 // 源码同时存入数据库并送交判题器，保持与用户提交完全一致。
 bool validate_source_code(const std::string &code, std::string &error);
+
+// 构造逐测试点结果 JSON。供提交与重判响应复用；WA 点附带输入/期望/实际输出，
+// AC 点不泄露隐藏用例。
+nlohmann::json build_per_case_json(const judge::JudgeTask &task,
+                                   const judge::JudgeResult &result);
 
 // 现有做题状态（纯数据，便于对状态计算单独做单元测试）。
 struct StatusState {

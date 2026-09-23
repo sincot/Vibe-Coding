@@ -1147,6 +1147,66 @@ await scenario("S20 重复提交与写入失败", async () => {
   window.fetch = orig;
 });
 
+await scenario("S22 重判入口与结果反馈", async () => {
+  setDomAuth(ctx.adminToken, ctx.adminUser);
+  // 准备一次 AC 提交（沿用种子题 A+B）。
+  const list = await api("GET", "/api/problems?q=A%2BB&visible=all", { token: ctx.adminToken });
+  const seed = (list.data.problems || [])[0];
+  const code = "#include <iostream>\nint main(){long long a,b;if(std::cin>>a>>b)std::cout<<(a+b)<<std::endl;return 0;}";
+  const sub = await api("POST", `/api/problems/${seed.id}/submit`, {
+    token: ctx.adminToken,
+    body: { language: "cpp17", code },
+  });
+  check("重判页准备提交成功", sub.status === 200, JSON.stringify(sub.data && sub.data.status));
+  const sid = sub.data && sub.data.id;
+
+  // 路由与入口可访问。
+  await goto("/admin/rejudge");
+  await waitFor(() => el("rejudge-id"), { label: "rejudge form" });
+  check("重判页表单可渲染", !!el("rejudge-id"));
+  check("子导航含重判入口", bodyText().includes("重判"), bodyText().slice(0, 200));
+
+  // 非法 ID 前端校验。
+  el("rejudge-id").value = "abc";
+  fireSubmit(q("form.admin-form"));
+  await waitFor(() => q("#app .alert-error"), { label: "invalid id" });
+  check("非法 ID 前端提示", bodyText().includes("正整数"), bodyText().slice(0, 200));
+
+  // 合法 ID：确认框说明后发起，完成后展示结果。
+  el("rejudge-id").value = String(sid);
+  fireSubmit(q("form.admin-form"));
+  await waitFor(() => modalTitle().includes("确认重判"), { label: "confirm modal" });
+  check("重判前有确认与说明", bodyText().includes("不增加提交次数") || modalTitle().includes("确认重判"),
+        modalTitle());
+  await clickModalConfirm();
+  await waitFor(() => q("#app .alert-success"), { label: "rejudge done", timeout: 30000 });
+  check("重判完成提示", bodyText().includes("重判完成"), bodyText().slice(0, 200));
+  check("结果区域展示判题结果", bodyText().includes("判题结果"), bodyText().slice(0, 300));
+  check("结果状态为 AC", bodyText().includes("AC"), bodyText().slice(0, 300));
+  const btn = buttonByText(document, "确认重判");
+  check("完成后按钮恢复", btn && !btn.disabled, btn ? String(btn.disabled) : "no button");
+
+  // 不存在的提交：显示记录不存在。
+  el("rejudge-id").value = "999999999";
+  fireSubmit(q("form.admin-form"));
+  await clickModalConfirm();
+  await waitFor(() => q("#app .alert-error"), { label: "not found" });
+  check("不存在提交显示错误", /不存在|404/.test(bodyText()), bodyText().slice(0, 200));
+
+  // 网络失败：显示无法确认，不假成功。
+  const orig = globalThis.fetch;
+  globalThis.fetch = () => Promise.reject(new TypeError("network down"));
+  window.fetch = globalThis.fetch;
+  el("rejudge-id").value = String(sid);
+  fireSubmit(q("form.admin-form"));
+  await clickModalConfirm();
+  await waitFor(() => q("#app .alert-error"), { label: "network error" });
+  check("网络失败提示无法确认", /网络|无法确认/.test(bodyText()), bodyText().slice(0, 200));
+  check("网络失败未显示成功", !q("#app .alert-success"), "unexpected success");
+  globalThis.fetch = orig;
+  window.fetch = orig;
+});
+
 await scenario("S21 自我降级成功后退出后台", async () => {
   // 先把普通用户提升为管理员，使自我降级可行。
   await api("PUT", "/api/admin/users", {

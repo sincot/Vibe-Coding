@@ -22,8 +22,8 @@ namespace {
 //
 // memory_kb：已通过 RSS 采样测得时给出数值；未采集到（如编译失败、进程未运行或
 // 采样失败）保持 null，明确区分「未采集」与真实的 0。
-nlohmann::json build_per_case(const judge::JudgeTask &task,
-                              const judge::JudgeResult &result) {
+nlohmann::json build_per_case_impl(const judge::JudgeTask &task,
+                                   const judge::JudgeResult &result) {
   using nlohmann::json;
   json cases = json::array();
   for (const judge::TestcaseResult &item : result.cases) {
@@ -71,6 +71,11 @@ nlohmann::json build_per_case(const judge::JudgeTask &task,
 }
 
 } // namespace
+
+nlohmann::json build_per_case_json(const judge::JudgeTask &task,
+                                   const judge::JudgeResult &result) {
+  return build_per_case_impl(task, result);
+}
 
 bool parse_submission_language(const std::string &text, std::string &canonical) {
   std::string lowered;
@@ -245,7 +250,7 @@ SubmitService::Outcome SubmitService::submit(std::int64_t user_id,
   record.language = language;
   record.source_code = source_code;
   record.status = judge::judge_status_name(judge_result.status);
-  record.per_case = build_per_case(task, judge_result).dump();
+  record.per_case = build_per_case_json(task, judge_result).dump();
   record.compile_msg = judge_result.compile_output;
   record.runtime_ms = total_runtime_ms;
   record.memory_kb = peak_memory_kb;

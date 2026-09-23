@@ -19,6 +19,7 @@ export function adminSubNav(active) {
   return h("div", { class: "admin-tabs" }, [
     link("题目管理", "/admin/problems", "problems"),
     link("用户管理", "/admin/users", "users"),
+    link("重判", "/admin/rejudge", "rejudge"),
     h("span", { class: "nav-spacer" }),
     h("a", { class: "admin-tab", text: "返回前台", attrs: { href: "#/problems" } }),
   ]);

@@ -42,6 +42,11 @@ public:
   bool find_by_id(std::int64_t id, bool &found, SubmissionRecord &out,
                   std::string &error);
 
+  // 更新已有提交记录的结果字段（status/per_case/compile_msg/runtime_ms/memory_kb）。
+  // 保留 id、user_id、problem_id、language、source_code、created_at 不变；
+  // 不新增提交记录，也不影响提交次数。
+  bool update(const SubmissionRecord &record, std::string &error);
+
 private:
   Database &db_;
 };
@@ -70,6 +75,13 @@ public:
   bool upsert(std::int64_t user_id, std::int64_t problem_id, bool accepted,
               bool has_first_ac_at, const std::string &first_ac_at,
               int submit_count, std::string &error);
+
+  // 在事务内依据该用户该题的最新提交记录重算做题状态：
+  //   - 仍有 AC 提交：status='accepted'，first_ac_at 为最早 AC 提交时间；
+  //   - 无 AC 提交：status='none'，first_ac_at 清空；
+  //   - submit_count 保持原值不变（若原无记录，则按实际提交次数初始化）。
+  bool recompute(std::int64_t user_id, std::int64_t problem_id,
+                 std::string &error);
 
 private:
   Database &db_;

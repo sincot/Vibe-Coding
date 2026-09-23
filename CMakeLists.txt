@@ -107,6 +107,7 @@ add_library(oj_core STATIC
   src/judge/judge.cpp
   src/judge/manager.cpp
   src/submit/submit.cpp
+  src/submit/rejudge.cpp
 )
 
 target_include_directories(oj_core PUBLIC
@@ -523,3 +524,15 @@ add_executable(oj_m35_persistence_shutdown_test
 target_link_libraries(oj_m35_persistence_shutdown_test PRIVATE oj_core)
 
 add_test(NAME m35_persistence_shutdown COMMAND oj_m35_persistence_shutdown_test)
+
+# M3.6 Rejudge 集成测试（隔离临时库 + 随机端口 + 受控/真实执行器）：
+# 管理员权限与首改限制、非法/不存在 ID、客户端字段不可替换、真实 g++/gcc 的
+# C++17/C11 AC/WA 互转、原记录保留与计数不变、状态重算（最早 AC/唯一失效/通过人数）、
+# 并发去重与队列满载 503、SYSERR/服务取消保留原结果、重启持久化。
+add_executable(oj_rejudge_api_test
+  tests/integration/test_rejudge_api.cpp
+)
+
+target_link_libraries(oj_rejudge_api_test PRIVATE oj_core)
+
+add_test(NAME rejudge_api COMMAND oj_rejudge_api_test)

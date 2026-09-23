@@ -25,8 +25,9 @@
 - [x] M3.3 运行隔离与资源限制（默认 tmpfs 工作目录 + `mkdtemp` 随机目录与安全清理 + user/mount/net/pid/ipc/uts 命名空间 + chroot 最小根目录 + 只读工作目录 + setrlimit CPU/文件/栈/fd/CORE + RSS 采样内存限制判 `MLE` + seccomp-bpf 禁网络/逃逸/进程创建/危险调用 + 64KB 输出上限 + 编译并发门限；真实 Linux 进程验证隔离、限制与 ASan/UBSan 兼容）
 - [x] M3.4 编译与结果分类（C++17/C11 生产编译模板默认接入 ASan/UBSan 且 UBSan 不可恢复 + 执行层结构化终止原因 + 统一分类 `AC/WA/CE/TLE/RE/MLE/SYSERR` + 可靠证据判 MLE + 逐点耗时/峰值内存与编译耗时采集 + WA 详情 + 编译诊断路径清洗与截断标识）
 - [x] M3.5 持久化与停止清理（完整结果/逐点详情/指标持久化与重启可读 + 任务标识贯穿接收/执行/保存/取消/清理日志 + 终端责任归属与重复保存/计数防护 + 数据库锁竞争有界 + 客户端断开保留已接收任务 + 队列/worker/子进程清理接入优雅停止 + 清理失败可定位不误删）
+- [x] M3.6 Rejudge（`POST /api/admin/submissions/{id}/rejudge`：原提交源码/语言 + 当前配置与用例快照重判 + 原记录更新不增次数 + 状态重算（最早 AC/无 AC 清空）+ 按提交 ID 并发去重 + 队列满载/重复重判明确错误 + SYSERR/取消保留原结果策略 + 后台 `#/admin/rejudge` 入口）
 
-后续阶段（Rejudge、CodeMirror、完整搜索筛选分页页面、提交历史/排行榜页面）尚未实现。
+后续阶段（CodeMirror、完整搜索筛选分页页面、提交历史/排行榜页面）尚未实现。
 
 ## 环境要求
 
@@ -216,6 +217,27 @@ ctest --test-dir build -R submit_scheduling_api --output-on-failure
 判题，AC/WA 交替），验证结果互不混用、每用户计数一致、无遗留子进程；本机实测最低可用
 内存约 737 MiB，无 OOM。该场景据此前的「长时间压测」范围收敛为产品目标规模（5 人同时），
 超出该目标的更高并发尚未验证。
+
+Rejudge 测试（M3.6，集成，隔离临时库 + 随机端口 + 受控/真实执行器）：
+
+```bash
+ctest --test-dir build -R rejudge_api --output-on-failure
+```
+
+`rejudge_api` 覆盖：管理员权限与首次改密限制、非法/不存在提交 ID（401/403/400/404 且
+不修改数据）、客户端夹带 `user_id`/`language`/`code`/`status`/`testcases` 不能替换原
+提交；真实 g++/gcc 下 C++17 的 AC→WA→AC 与 C11 的 WA→AC→WA（修改当前用例后重判生效）；
+原记录更新而保留 ID/归属/源码/语言/`created_at`，不新增记录、不增加 `submit_count`；
+状态重算（最早 AC 被重判失效后 `first_ac_at` 更新为其余 AC 的最早原提交时间、唯一 AC
+失效后清空为 `none`、`pass_count` 同步变化）；同一提交重复重判 `409 REJUDGE_IN_PROGRESS`、
+不同提交排队、队列满载 `503 JUDGE_QUEUE_FULL`、完成后去重释放；SYSERR 与服务取消按既定
+策略保留原结果与统计（返回 500）；客户端在重判执行中断开后，任务仍完成并更新原记录、
+去重占用可靠释放（原始 socket 用例）；管理员可重判隐藏题目的提交；重启后重判结果与统计
+保持一致（11 场景 / 116 项断言）。前端 `tests/frontend/admin_pages_dom.mjs` 的 S22 重判
+场景已用 jsdom 完成 DOM 级执行，全量 **127/127** 通过（入口、确认与不增次数说明、等待态
+禁用、结果与诊断展示、记录不存在与网络失败提示、不泄露无权信息）；执行中发现并修复
+`web/js/pages/admin-rejudge.js` 成功提示被 `renderJudgeResult` 清除的缺陷（改为独立状态区），
+并修正 S22 与 S21 的场景顺序（不得在自我降级后使用已降级的 admin token）。
 
 管理员题目接口测试（M2.1，单元 + 集成，隔离临时库 + 随机端口 + 可注入执行器）：
 
@@ -1062,6 +1084,70 @@ curl -i -X PUT http://127.0.0.1:8080/api/admin/users \
 
 > 运行日志记录操作者 ID、目标用户 ID、操作类型与结果，**不记录密码、哈希或完整 token**；
 > 目标用户不存在、请求非法或写入失败时不产生部分更新。
+
+### 管理员重判接口（M3.6）
+
+`POST /api/admin/submissions/{id}/rejudge`（需管理员权限），使用数据库中保存的原提交
+源码、语言与当前题目配置（含完整测试用例）重新判题，更新原提交记录，并联动重算该用户
+该题的做题状态；不新增提交记录，不增加 `submit_count`。
+
+```bash
+curl -i -X POST http://127.0.0.1:8080/api/admin/submissions/42/rejudge \
+  -H 'Authorization: Bearer <admin-token>' \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+```
+
+成功响应（`200`）：返回更新后的原提交结果，字段与 `POST /api/problems/{id}/submit` 的
+成功响应一致（`id` 为原提交 ID，`created_at` 保持不变，`status`/`results`/`runtime_ms`/
+`memory_kb`/`compile_output` 等为本次重判结果）。
+
+```json
+{"id":42,"problem_id":1,"language":"cpp17","status":"AC","passed":5,"total":5,
+ "runtime_ms":18,"memory_kb":8420,"compile_time_ms":640,"compile_ok":true,
+ "compile_output":"","compile_output_truncated":false,
+ "message":"全部测试点通过","created_at":"2026-09-21 12:00:00",
+ "results":[{"index":0,"status":"AC","time_ms":3,"memory_kb":8000}]}
+```
+
+权限与错误约定：
+
+| 检查 | 结果 |
+|---|---|
+| 未登录 / 无效 token | `401` |
+| 非管理员；或管理员未完成首次改密 | `403`（含 `code:"PASSWORD_CHANGE_REQUIRED"`） |
+| 非法提交 ID（非数字 / `0` / 负数 / 溢出） | `400` |
+| 提交记录不存在 | `404` |
+| 该提交 ID 已有正在进行的重判 | `409` + `code:"REJUDGE_IN_PROGRESS"` |
+| 判题队列已满 | `503` + `code:"JUDGE_QUEUE_FULL"` + `Retry-After` |
+| 判题服务正在停止 | `503` + `code:"JUDGE_UNAVAILABLE"` |
+| 重判过程中产生 SYSERR（服务取消 / 全局硬上限 / 环境故障等） | `500`（按当前策略保留原结果与统计，见下文） |
+| 数据库写入等内部故障 | `500`（事务回滚，不覆盖原结果） |
+
+重判规则：
+
+- **源码与语言**：从 `submissions` 原记录读取，客户端请求体不得替换源码、语言、用户归属或
+  指定结果；请求体中任何额外字段均被忽略。
+- **题目配置**：使用当前 `problems.time_limit_ms` / `memory_limit_kb` 与当前完整测试用例
+  （含隐藏用例），判题前构造内存快照，判题期间修改用例不会让同一次重判混用不同版本。
+- **调度**：重判与普通提交共用 `JudgeManager` 的有界队列、worker、编译并发门限、取消机制与
+  结果通道；`HTTP` 同步等待结果，不另开绕过调度器的执行路径。
+- **持久化**：在原 `submissions` 记录上更新 `status` / `per_case` / `compile_msg` /
+  `runtime_ms` / `memory_kb`；保留 `id` / `user_id` / `problem_id` / `language` /
+  `source_code` / `created_at`；不新增提交记录，不增加提交次数。
+- **状态重算**：更新原记录与 `user_problem_status` 在同一个短事务内完成：
+  - 该用户该题仍有状态为 `AC` 的提交：`status='accepted'`，`first_ac_at` 为其中最早的
+    `created_at`；
+  - 已无 `AC` 提交：`status='none'`，`first_ac_at` 清空；
+  - `submit_count` 不因重判增加或减少。
+- **并发去重**：同一 `submissions.id` 同时只能有一个待执行或正在执行的重判；冲突请求返回
+  `409 REJUDGE_IN_PROGRESS`。完成、失败或取消后从去重集合移除。
+- **失败处理策略（本阶段明确）**：当本次重判最终状态为 `SYSERR`（含服务取消、全局硬上限、
+  编译/运行环境故障等）时，视为“无法完成本次重判”，保留原提交结果与统计，向管理员返回
+  `500` 及失败原因；待后续需求最终确认后可调整是否覆盖。持久化事务失败同样回滚，原结果
+  与统计保持不变。
+
+> 日志记录操作者 ID、提交 ID、任务标识与最终结果，不记录 token、完整源码或隐藏用例。
 
 ### 提交接口（M1.6）
 

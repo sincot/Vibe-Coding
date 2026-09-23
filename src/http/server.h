@@ -3,8 +3,10 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_set>
 
 #include <httplib.h>
 
@@ -24,6 +26,7 @@
 #include "judge/executor.h"
 #include "judge/judge.h"
 #include "judge/manager.h"
+#include "submit/rejudge.h"
 #include "submit/submit.h"
 
 namespace oj {
@@ -120,6 +123,8 @@ private:
                                httplib::Response &res);
   void handle_admin_update_user(const httplib::Request &req,
                                 httplib::Response &res);
+  void handle_admin_rejudge(const httplib::Request &req,
+                            httplib::Response &res);
   void handle_test_admin_only(const httplib::Request &req,
                               httplib::Response &res);
 
@@ -133,6 +138,10 @@ private:
   // 身份验证。认证失败已写入响应并返回 false；成功时填充 viewer。
   bool resolve_viewer(const httplib::Request &req, httplib::Response &res,
                       ProblemViewer &viewer);
+
+  // 将已持久化的提交记录与判题结果构造为统一 JSON 响应（提交 / 重判复用）。
+  nlohmann::json submission_result_json(const SubmissionRecord &record,
+                                        const judge::JudgeResult &judge);
 
   std::string host_;
   int port_;
@@ -152,9 +161,13 @@ private:
   std::unique_ptr<judge::IExecutor> owned_executor_;
   judge::IExecutor *judge_executor_ = nullptr;
   std::unique_ptr<submit::SubmitService> submit_service_;
-  // 判题任务调度器：持有 worker 线程池与有界等待队列，在 submit_service_ 之后
-  // 构造、之前析构，确保调度器停止时提交服务仍然有效。
+  std::unique_ptr<submit::RejudgeService> rejudge_service_;
+  // 判题任务调度器：持有 worker 线程池与有界等待队列，在 submit_service_ /
+  // rejudge_service_ 之后构造、之前析构，确保调度器停止时服务仍然有效。
   std::unique_ptr<judge::JudgeManager> judge_manager_;
+  // 重判并发去重：同一提交 ID 同时只能有一个待执行或正在执行的重判。
+  std::mutex rejudge_mutex_;
+  std::unordered_set<std::int64_t> rejudge_in_flight_;
   // cpp-httplib 请求处理线程数：>= 调度器并发上限 + 保留量，避免同步等待判题占满
   // 全部 HTTP 处理能力（健康检查与题目查询始终有可用线程）。
   int http_thread_count_ = 0;

@@ -51,6 +51,7 @@ export function renderAdminHome(container) {
       adminCard("题目管理", "创建、编辑、公开/隐藏与删除题目，维护公开样例。", "/admin/problems"),
       adminCard("测试用例管理", "为指定题目录入、编辑、排序与删除隐藏测试用例。", "/admin/problems"),
       adminCard("用户管理", "查看用户列表，重置密码与修改角色。", "/admin/users"),
+      adminCard("重判", "按提交 ID 使用当前题目配置重新判题，更新结果与状态统计。", "/admin/rejudge"),
     ])
   );
 }

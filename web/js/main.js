@@ -14,6 +14,7 @@ import {
   renderAdminProblemForm,
   renderAdminProblems,
 } from "./pages/admin-problems.js";
+import { renderAdminRejudge } from "./pages/admin-rejudge.js";
 import { renderAdminTestcases } from "./pages/admin-testcases.js";
 import { renderAdminUsers } from "./pages/admin-users.js";
 import {
@@ -60,6 +61,7 @@ addRoute("/admin/problems/:id/testcases", renderAdminTestcases, {
   adminOnly: true,
 });
 addRoute("/admin/users", renderAdminUsers, { protected: true, adminOnly: true });
+addRoute("/admin/rejudge", renderAdminRejudge, { protected: true, adminOnly: true });
 
 setNotFound((container) => {
   document.title = "页面不存在 · OJ";

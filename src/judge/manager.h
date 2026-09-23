@@ -45,6 +45,9 @@ struct SubmissionTask {
   // 协作式取消令牌：由 JudgeManager 为每个任务创建并在服务停止时置位。判题核心与
   // 执行器据此停止启动新进程并终止正在运行的进程组。空指针表示不支持取消。
   std::shared_ptr<CancellationToken> cancel;
+  // 重判标识：非 0 时表示这是对指定 submissions.id 的重判，handler 应走重判路径。
+  // 普通提交保持 0。
+  std::int64_t rejudge_submission_id = 0;
 };
 
 // 判题任务调度器（SPEC JUDGE-09 / M3.1 架构图中的 JudgeManager）。

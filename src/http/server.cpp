@@ -67,6 +67,38 @@ void send_judge_unavailable(httplib::Response &res) {
   send_json(res, 503, body);
 }
 
+// 同一提交已有正在进行的重判：返回明确冲突标识，避免重复排队。
+void send_rejudge_in_progress(httplib::Response &res) {
+  json body;
+  body["error"] = "该提交正在重判中";
+  body["code"] = "REJUDGE_IN_PROGRESS";
+  send_json(res, 409, body);
+}
+
+// 重判并发去重守卫：在作用域结束时从“进行中”集合移除该提交 ID。
+class RejudgeGuard {
+public:
+  RejudgeGuard(std::mutex &mutex, std::unordered_set<std::int64_t> &set,
+               std::int64_t id)
+      : mutex_(mutex), set_(set), id_(id), active_(true) {}
+
+  void release() { active_ = false; }
+
+  ~RejudgeGuard() {
+    if (!active_) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    set_.erase(id_);
+  }
+
+private:
+  std::mutex &mutex_;
+  std::unordered_set<std::int64_t> &set_;
+  std::int64_t id_;
+  bool active_;
+};
+
 // 除判题并发上限之外额外保留的 HTTP 处理线程数，用于在判题繁忙/队列满载时仍能
 // 应答健康检查与题目查询等非提交请求。取值需覆盖教学规模下的常规并发查询。
 constexpr int kHttpReserveThreads = 8;
@@ -315,11 +347,16 @@ HttpServer::HttpServer(std::string host, int port, Database &db,
     judge_executor_ = owned_executor_.get();
   }
   submit_service_ = std::make_unique<submit::SubmitService>(
+      db, *judge_executor_, judge_options);
+  rejudge_service_ = std::make_unique<submit::RejudgeService>(
       db, *judge_executor_, std::move(judge_options));
 
-  // 判题调度器：handler 复用 SubmitService（单次判题 + 持久化），仅负责调度。
+  // 判题调度器：handler 复用 SubmitService / RejudgeService，仅负责调度。
   judge_manager_ = std::make_unique<judge::JudgeManager>(
-      [this](const judge::SubmissionTask &task) {
+      [this](const judge::SubmissionTask &task) -> submit::SubmitService::Outcome {
+        if (task.rejudge_submission_id != 0) {
+          return rejudge_service_->rejudge(task);
+        }
         return submit_service_->submit(task.user_id, task.problem_id,
                                        task.language, task.source_code,
                                        task.viewer_is_admin, task.submitted_at,
@@ -503,6 +540,13 @@ void HttpServer::setup_routes() {
                                       httplib::Response &res) {
     handle_admin_update_user(req, res);
   });
+
+  // 管理员重判接口（M3.6）：使用原提交源码/语言与当前题目配置重新判题，
+  // 更新原记录并联动重算用户题目状态；不新增提交记录、不增加次数。
+  svr_.Post(R"(/api/admin/submissions/([^/]+)/rejudge)",
+            [this](const httplib::Request &req, httplib::Response &res) {
+              handle_admin_rejudge(req, res);
+            });
 
   // 测试专用路由：仅 enable_test_routes_ 为 true（集成测试）时注册，
   // 用于在正式管理员业务接口落地前验证管理员权限与首次改密限制的组合行为。
@@ -1014,34 +1058,43 @@ void HttpServer::handle_submit(const httplib::Request &req,
                           std::to_string(saved.problem_id) + "，语言 " +
                           saved.language + "）：" + saved.status);
 
-  json body;
-  body["id"] = saved.id;
-  body["problem_id"] = saved.problem_id;
-  body["language"] = saved.language;
-  body["status"] = saved.status;
-  body["passed"] = outcome.judge.passed;
-  body["total"] = outcome.judge.total;
-  body["runtime_ms"] = saved.runtime_ms;
-  // 采集到峰值 RSS 时返回数值；未采集到（如编译失败或采样失败）返回 null，
-  // 明确区分「未采集」与真实的 0。单位 kB。
-  body["memory_kb"] =
-      saved.memory_kb > 0 ? json(saved.memory_kb) : json(nullptr);
-  body["compile_time_ms"] = outcome.judge.compile_time_ms;
-  body["compile_ok"] = outcome.judge.compile_ok;
-  body["compile_output"] = saved.compile_msg;
-  body["compile_output_truncated"] = outcome.judge.compile_output_truncated;
-  body["message"] = outcome.judge.message;
-  body["created_at"] = saved.created_at;
-  try {
-    body["results"] = json::parse(saved.per_case);
-  } catch (const std::exception &) {
-    // 正常路径不会发生；作为内部故障处理，不返回半成品结果。
-    log(LogLevel::Error, "提交 #" + std::to_string(saved.id) +
-                             " 的逐点结果 JSON 解析失败");
-    send_error(res, 500, "内部错误");
+  json body = submission_result_json(saved, outcome.judge);
+  if (body.is_null()) {
+    // submission_result_json 已记录日志并设置 500 响应。
     return;
   }
   send_json(res, 200, body);
+}
+
+json HttpServer::submission_result_json(
+    const SubmissionRecord &record, const judge::JudgeResult &judge) {
+  json body;
+  body["id"] = record.id;
+  body["problem_id"] = record.problem_id;
+  body["language"] = record.language;
+  body["status"] = record.status;
+  body["passed"] = judge.passed;
+  body["total"] = judge.total;
+  body["runtime_ms"] = record.runtime_ms;
+  // 采集到峰值 RSS 时返回数值；未采集到（如编译失败或采样失败）返回 null，
+  // 明确区分「未采集」与真实的 0。单位 kB。
+  body["memory_kb"] =
+      record.memory_kb > 0 ? json(record.memory_kb) : json(nullptr);
+  body["compile_time_ms"] = judge.compile_time_ms;
+  body["compile_ok"] = judge.compile_ok;
+  body["compile_output"] = record.compile_msg;
+  body["compile_output_truncated"] = judge.compile_output_truncated;
+  body["message"] = judge.message;
+  body["created_at"] = record.created_at;
+  try {
+    body["results"] = json::parse(record.per_case);
+  } catch (const std::exception &) {
+    // 正常路径不会发生；作为内部故障处理，不返回半成品结果。
+    log(LogLevel::Error, "提交记录 #" + std::to_string(record.id) +
+                             " 的逐点结果 JSON 解析失败");
+    return json();
+  }
+  return body;
 }
 
 void HttpServer::handle_admin_create_problem(const httplib::Request &req,
@@ -1497,6 +1550,111 @@ void HttpServer::handle_admin_update_user(const httplib::Request &req,
       send_error(res, 500, "内部错误");
       return;
   }
+}
+
+void HttpServer::handle_admin_rejudge(const httplib::Request &req,
+                                      httplib::Response &res) {
+  auth::AuthUser admin;
+  if (!require_admin(req, res, admin)) {
+    return;
+  }
+
+  // 1. 校验提交 ID。
+  std::int64_t submission_id = 0;
+  if (req.matches.size() < 2 ||
+      !parse_problem_id(req.matches[1].str(), submission_id)) {
+    send_error(res, 400, "非法提交 ID");
+    return;
+  }
+
+  // 2. 读取原提交记录，用于构造调度任务（源码/语言/题目归属均来自数据库）。
+  SubmissionStore submission_store(db_);
+  bool found = false;
+  SubmissionRecord record;
+  std::string err;
+  if (!submission_store.find_by_id(submission_id, found, record, err)) {
+    log(LogLevel::Error, "管理员重判：读取提交失败 #" +
+                              std::to_string(submission_id) + ": " + err);
+    send_error(res, 500, "内部错误");
+    return;
+  }
+  if (!found) {
+    send_error(res, 404, "提交记录不存在");
+    return;
+  }
+
+  // 3. 并发去重：同一提交 ID 同时只能有一个待执行或正在执行的重判。
+  std::unique_ptr<RejudgeGuard> guard;
+  {
+    std::lock_guard<std::mutex> lock(rejudge_mutex_);
+    if (rejudge_in_flight_.count(submission_id) != 0) {
+      send_rejudge_in_progress(res);
+      return;
+    }
+    rejudge_in_flight_.insert(submission_id);
+    guard = std::make_unique<RejudgeGuard>(rejudge_mutex_, rejudge_in_flight_,
+                                           submission_id);
+  }
+
+  // 4. 构造自带完整数据的调度任务，交给 JudgeManager（与普通提交共用队列/worker）。
+  judge::SubmissionTask task;
+  task.user_id = record.user_id;
+  task.problem_id = record.problem_id;
+  task.language = record.language;
+  task.source_code = record.source_code;
+  task.viewer_is_admin = true; // 管理员重判不受题目可见性限制
+  task.submitted_at = submit::utc_timestamp_now();
+  task.rejudge_submission_id = submission_id;
+
+  judge::JudgeManager::SubmitResult enqueued = judge_manager_->submit(std::move(task));
+  if (enqueued.status == judge::JudgeManager::EnqueueStatus::QueueFull) {
+    send_judge_queue_full(res);
+    return;
+  }
+  if (enqueued.status == judge::JudgeManager::EnqueueStatus::Stopped) {
+    send_judge_unavailable(res);
+    return;
+  }
+
+  // 5. 同步等待判题与持久化结果。
+  submit::SubmitService::Outcome outcome;
+  try {
+    outcome = enqueued.future.get();
+  } catch (const std::exception &e) {
+    log(LogLevel::Error, "管理员重判：结果通道异常 #" +
+                              std::to_string(submission_id) + ": " + e.what());
+    send_error(res, 500, "内部错误");
+    return;
+  }
+
+  switch (outcome.kind) {
+    case submit::SubmitService::Kind::ProblemNotFound:
+      send_error(res, 404, outcome.error.empty() ? "提交记录不存在" : outcome.error);
+      return;
+    case submit::SubmitService::Kind::InternalError:
+      log(LogLevel::Error, "管理员 " + std::to_string(admin.id) +
+                               " 重判提交 #" + std::to_string(submission_id) +
+                               " 失败：" + outcome.error);
+      send_error(res, 500, outcome.error.empty() ? "内部错误" : outcome.error);
+      return;
+    case submit::SubmitService::Kind::Ok:
+      break;
+  }
+
+  // 6. 返回更新后的提交结果。
+  const SubmissionRecord &saved = outcome.submission;
+  log(LogLevel::Info, "管理员 " + std::to_string(admin.id) + " 重判提交 #" +
+                          std::to_string(saved.id) + "（用户 " +
+                          std::to_string(saved.user_id) + "，题目 " +
+                          std::to_string(saved.problem_id) + "，语言 " +
+                          saved.language + "）：" + saved.status);
+
+  json body = submission_result_json(saved, outcome.judge);
+  if (body.is_null()) {
+    send_error(res, 500, "内部错误");
+    return;
+  }
+  send_json(res, 200, body);
 }
 
 void HttpServer::handle_test_admin_only(const httplib::Request &req,

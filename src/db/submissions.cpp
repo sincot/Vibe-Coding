@@ -83,6 +83,31 @@ bool SubmissionStore::find_by_id(std::int64_t id, bool &found,
   return false;
 }
 
+bool SubmissionStore::update(const SubmissionRecord &record,
+                             std::string &error) {
+  Statement stmt;
+  if (!db_.prepare(
+          "UPDATE submissions SET status = ?, per_case = ?, compile_msg = ?, "
+          "runtime_ms = ?, memory_kb = ? WHERE id = ?",
+          stmt, error)) {
+    return false;
+  }
+  if (!stmt.bind(1, record.status) || !stmt.bind(2, record.per_case) ||
+      !stmt.bind(3, record.compile_msg) ||
+      !stmt.bind(4, static_cast<sqlite3_int64>(record.runtime_ms)) ||
+      !stmt.bind(5, static_cast<sqlite3_int64>(record.memory_kb)) ||
+      !stmt.bind(6, static_cast<sqlite3_int64>(record.id))) {
+    error = stmt.errmsg();
+    return false;
+  }
+  int rc = stmt.step();
+  if (rc != SQLITE_DONE) {
+    error = stmt.errmsg();
+    return false;
+  }
+  return true;
+}
+
 bool UserProblemStatusStore::find(std::int64_t user_id,
                                   std::int64_t problem_id, bool &found,
                                   UserProblemStatusRecord &out,
@@ -150,6 +175,91 @@ bool UserProblemStatusStore::upsert(std::int64_t user_id,
     return false;
   }
   return true;
+}
+
+bool UserProblemStatusStore::recompute(std::int64_t user_id,
+                                       std::int64_t problem_id,
+                                       std::string &error) {
+  // 保持 submit_count 不变；若此前无记录，则按实际提交次数初始化。
+  int submit_count = 0;
+  bool has_record = false;
+  {
+    Statement stmt;
+    if (!db_.prepare(
+            "SELECT submit_count FROM user_problem_status WHERE user_id = ? "
+            "AND problem_id = ?",
+            stmt, error)) {
+      return false;
+    }
+    if (!stmt.bind(1, static_cast<sqlite3_int64>(user_id)) ||
+        !stmt.bind(2, static_cast<sqlite3_int64>(problem_id))) {
+      error = stmt.errmsg();
+      return false;
+    }
+    int rc = stmt.step();
+    if (rc == SQLITE_ROW) {
+      submit_count = stmt.column_int(0);
+      has_record = true;
+    } else if (rc == SQLITE_DONE) {
+      submit_count = 0;
+    } else {
+      error = stmt.errmsg();
+      return false;
+    }
+  }
+
+  if (!has_record) {
+    Statement stmt;
+    if (!db_.prepare(
+            "SELECT COUNT(*) FROM submissions WHERE user_id = ? AND "
+            "problem_id = ?",
+            stmt, error)) {
+      return false;
+    }
+    if (!stmt.bind(1, static_cast<sqlite3_int64>(user_id)) ||
+        !stmt.bind(2, static_cast<sqlite3_int64>(problem_id))) {
+      error = stmt.errmsg();
+      return false;
+    }
+    int rc = stmt.step();
+    if (rc == SQLITE_ROW) {
+      submit_count = stmt.column_int(0);
+    } else if (rc != SQLITE_DONE) {
+      error = stmt.errmsg();
+      return false;
+    }
+  }
+
+  // 查找当前仍 AC 的最早原提交时间。
+  std::string first_ac_at;
+  bool has_ac = false;
+  {
+    Statement stmt;
+    if (!db_.prepare(
+            "SELECT MIN(created_at) FROM submissions WHERE user_id = ? AND "
+            "problem_id = ? AND status = 'AC'",
+            stmt, error)) {
+      return false;
+    }
+    if (!stmt.bind(1, static_cast<sqlite3_int64>(user_id)) ||
+        !stmt.bind(2, static_cast<sqlite3_int64>(problem_id))) {
+      error = stmt.errmsg();
+      return false;
+    }
+    int rc = stmt.step();
+    if (rc == SQLITE_ROW) {
+      if (!stmt.column_is_null(0)) {
+        first_ac_at = stmt.column_text(0);
+        has_ac = true;
+      }
+    } else if (rc != SQLITE_DONE) {
+      error = stmt.errmsg();
+      return false;
+    }
+  }
+
+  return upsert(user_id, problem_id, has_ac, has_ac, first_ac_at,
+                submit_count, error);
 }
 
 } // namespace oj
