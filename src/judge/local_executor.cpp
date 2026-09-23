@@ -214,6 +214,23 @@ bool starts_with(const std::string &value, const std::string &prefix) {
          value.compare(0, prefix.size(), prefix) == 0;
 }
 
+// 判断诊断内容是否包含主流 Sanitizer 报告的特征字符串。仅用于在进程已异常终止
+// 时补充诊断文案，绝不作为状态判定依据（用户可自行打印类似文本）。
+bool looks_like_sanitizer_report(const std::string &stderr_data) {
+  static const char *const kMarkers[] = {
+      "AddressSanitizer", "UndefinedBehaviorSanitizer",
+      "LeakSanitizer",   "runtime error:",
+      "heap-buffer-overflow", "stack-buffer-overflow",
+      "SUMMARY: AddressSanitizer", "SUMMARY: UndefinedBehaviorSanitizer",
+  };
+  for (const char *marker : kMarkers) {
+    if (stderr_data.find(marker) != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
 std::string dir_name(const std::string &path) {
   std::size_t pos = path.find_last_of('/');
   if (pos == std::string::npos) {
@@ -402,6 +419,15 @@ ProcessResult LocalExecutor::compile(const CompileRequest &request) {
   argv.push_back("-o");
   argv.push_back(request.output_path);
   argv.push_back("-lm");
+  // SPEC JUDGE-01：C++17 / C11 均全开 AddressSanitizer 与 UndefinedBehaviorSanitizer。
+  // -fno-sanitize-recover=all 使 UBSan 一旦报告未定义行为即中止（而非打印诊断后继续
+  // 执行），从而不会出现「UB 已报错但输出仍匹配而被判 AC」的情况；ASan 本身即不可
+  // 恢复。确切的选项由执行器集中维护，不接受用户源码或请求参数拼接。
+  if (request.sanitizers) {
+    argv.push_back("-fsanitize=address,undefined");
+    argv.push_back("-fno-omit-frame-pointer");
+    argv.push_back("-fno-sanitize-recover=all");
+  }
   for (const std::string &flag : request.extra_flags) {
     argv.push_back(flag);
   }
@@ -442,6 +468,7 @@ ProcessResult LocalExecutor::spawn(const std::vector<std::string> &argv,
   }
   if (cancel != nullptr && cancel->cancelled()) {
     result.cancelled = true;
+    result.termination = TerminationReason::Cancelled;
     result.launch_error_message = "任务已取消";
     return result;
   }
@@ -536,8 +563,10 @@ ProcessResult LocalExecutor::spawn(const std::vector<std::string> &argv,
   if (phase == SandboxPhase::Run) {
     // LeakSanitizer 需要 ptrace/clone，与“禁止创建进程 + 禁 ptrace”策略冲突，
     // 故关闭泄漏检测；ASan/UBSan 的错误检测仍完全生效（不影响越界等诊断）。
+    // halt_on_error=1 让 UBSan 在运行时错误处立即停止（与编译期
+    // -fno-sanitize-recover=all 双保险），避免带着未定义行为继续执行到输出匹配。
     env_strings.push_back("ASAN_OPTIONS=detect_leaks=0");
-    env_strings.push_back("UBSAN_OPTIONS=print_stacktrace=1");
+    env_strings.push_back("UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1");
   }
   std::vector<char *> envp;
   envp.reserve(env_strings.size() + 1);
@@ -1102,6 +1131,28 @@ ProcessResult LocalExecutor::spawn(const std::vector<std::string> &argv,
   result.time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::steady_clock::now() - start)
                        .count();
+
+  // 结构化终止原因：由执行层集中记录，分类层不再各自组合布尔量。主动终止
+  // （取消/超时/内存）优先于退出状态；仅当诊断确实异常时才标注 Sanitizer。
+  if (result.cancelled) {
+    result.termination = TerminationReason::Cancelled;
+  } else if (result.timed_out) {
+    result.termination = TerminationReason::TimedOut;
+  } else if (result.memory_exceeded) {
+    result.termination = TerminationReason::MemoryExceeded;
+  } else if (result.exited && result.exit_code == 0) {
+    result.termination = TerminationReason::Completed;
+  } else if (result.exited) {
+    result.termination = TerminationReason::NonZeroExit;
+  } else if (result.term_signal != 0) {
+    result.termination = TerminationReason::Signaled;
+  } else {
+    result.termination = TerminationReason::LaunchFailure;
+  }
+  if (result.termination != TerminationReason::Completed &&
+      looks_like_sanitizer_report(result.stderr_data)) {
+    result.sanitizer_error = true;
+  }
 
   // 进程已被回收，最后一次采样峰值内存，避免错过短命程序的内存峰值。
   if (kMemoryLimitKb > 0) {

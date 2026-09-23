@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "judge/comparator.h"
+#include "judge/classification.h"
 #include "judge/compile_gate.h"
 #include "judge/workspace.h"
 
@@ -149,8 +150,11 @@ JudgeResult JudgeEngine::judge(const JudgeTask &task,
   compile_request.sandbox = options_.sandbox_enabled;
   compile_request.memory_limit_kb = options_.compile_memory_limit_kb;
   compile_request.extra_flags = options_.extra_compile_flags;
+  compile_request.sanitizers = options_.sanitizers_enabled;
 
   ProcessResult compile_result = executor_.compile(compile_request);
+  result.compile_time_ms = compile_result.time_ms;
+  result.compile_output_truncated = compile_result.stdout_truncated;
   // 编译结束立即释放编译许可，运行阶段不占用高内存阶段的并发名额。
   gate_guard.release_now();
   result.compile_output = compile_result.stdout_data;
@@ -160,6 +164,10 @@ JudgeResult JudgeEngine::judge(const JudgeTask &task,
     }
     result.compile_output += compile_result.stderr_data;
   }
+  // 清洗内部路径：不向用户回显工作目录/沙箱临时目录等无关信息，同时保留编译器
+  // 对用户源码的诊断（如 main.cpp:3:5: error: ...）。
+  result.compile_output =
+      scrub_compile_diagnostics(result.compile_output, workspace->path());
 
   if (compile_result.cancelled) {
     mark_cancelled();
@@ -243,6 +251,10 @@ JudgeResult JudgeEngine::judge(const JudgeTask &task,
 
     ProcessResult run_result = executor_.run(run_request, testcase.input);
 
+    const long long effective_memory_limit_kb =
+        task.memory_limit_kb > 0 ? task.memory_limit_kb
+                                 : options_.default_memory_limit_kb;
+
     TestcaseResult case_result;
     case_result.index = static_cast<int>(i);
     case_result.time_ms = run_result.time_ms;
@@ -252,73 +264,65 @@ JudgeResult JudgeEngine::judge(const JudgeTask &task,
     case_result.output_truncated = run_result.stdout_truncated;
     case_result.exit_code = run_result.exit_code;
     case_result.term_signal = run_result.term_signal;
+    case_result.termination = run_result.termination;
+    case_result.sanitizer_error = run_result.sanitizer_error;
     case_result.stderr_output = run_result.stderr_data;
 
-    if (run_result.cancelled) {
-      case_result.status = JudgeStatus::SYSERR;
-      case_result.message = "服务停止，判题已取消";
-      result.cases.push_back(std::move(case_result));
-      mark_cancelled();
-      break;
-    } else if (run_result.launch_error) {
-      case_result.status = JudgeStatus::SYSERR;
+    // 分类层统一处理：把执行层的结构化证据映射为确定的状态与诊断，避免不同
+    // 执行路径各自判定。输出比对只用于 AC/WA 判定，实际输出始终保留原始文本。
+    CaseEvidence evidence;
+    evidence.launch_error = run_result.launch_error;
+    evidence.sandbox_error = run_result.sandbox_error;
+    evidence.cancelled = run_result.cancelled;
+    evidence.timed_out = run_result.timed_out;
+    evidence.global_capped = global_capped;
+    evidence.memory_exceeded = run_result.memory_exceeded;
+    evidence.exited = run_result.exited;
+    evidence.exit_code = run_result.exit_code;
+    evidence.term_signal = run_result.term_signal;
+    evidence.output_truncated = run_result.stdout_truncated;
+    evidence.sanitizer_error = run_result.sanitizer_error;
+    evidence.output_matches =
+        outputs_match(testcase.output, run_result.stdout_data);
+    evidence.time_limit_ms = problem_limit_ms;
+    evidence.memory_limit_kb = effective_memory_limit_kb;
+    evidence.peak_memory_kb = run_result.memory_kb;
+    evidence.stdout_limit_bytes =
+        static_cast<long long>(options_.stdout_limit_bytes);
+
+    const CaseVerdict verdict = classify_case(evidence);
+    case_result.status = verdict.status;
+    case_result.message = verdict.message;
+    case_result.global_deadline_hit = verdict.global_deadline_hit;
+    if (verdict.status == JudgeStatus::AC) {
+      ++result.passed;
+    } else {
+      case_result.actual_output = run_result.stdout_data;
+    }
+    // 启动失败保留执行层给出的具体原因（可能是编译器/沙箱/系统故障），便于定位。
+    if (run_result.launch_error) {
       case_result.message =
           (run_result.sandbox_error ? std::string("运行沙箱不可用: ")
                                     : std::string("无法启动运行进程: ")) +
           run_result.launch_error_message;
-      result.cases.push_back(std::move(case_result));
-      break; // 系统/策略故障：无法继续可靠判题，提前终止
-    } else if (run_result.timed_out && global_capped) {
-      // 该点并未超过题目时限，而是可用全局预算不足以完成，属全局硬上限终止。
-      case_result.status = JudgeStatus::TLE;
-      case_result.global_deadline_hit = true;
-      case_result.message = "触发全局判题时间上限（" +
-                            std::to_string(options_.global_time_limit_ms) +
-                            " ms）";
-      result.cases.push_back(std::move(case_result));
-      mark_global_exhausted();
-      break;
-    } else if (run_result.timed_out) {
-      case_result.status = JudgeStatus::TLE;
-      case_result.message =
-          "超出时间限制（" + std::to_string(problem_limit_ms) + " ms）";
-    } else if (run_result.memory_exceeded) {
-      // 明确由 RSS 采样判定超内存：与所有 SIGKILL 区分，保留证据供 M3.4 分类。
-      case_result.status = JudgeStatus::MLE;
-      case_result.message =
-          "超出内存限制（RSS > " +
-          std::to_string(task.memory_limit_kb > 0 ? task.memory_limit_kb
-                                                  : options_.default_memory_limit_kb) +
-          " kB，峰值 " + std::to_string(run_result.memory_kb) + " kB）";
-    } else if (run_result.term_signal != 0) {
-      case_result.status = JudgeStatus::RE;
-      case_result.message = "运行时被信号 " +
-                            std::to_string(run_result.term_signal) + " 终止";
-    } else if (!run_result.exited) {
-      case_result.status = JudgeStatus::RE;
-      case_result.message = "运行进程未正常结束";
-    } else if (run_result.exit_code != 0) {
-      case_result.status = JudgeStatus::RE;
-      case_result.message =
-          "非零退出码 " + std::to_string(run_result.exit_code);
-    } else if (run_result.stdout_truncated) {
-      // 输出超限时结果已被截断，绝不能当作正常输出判为 AC。
-      case_result.status = JudgeStatus::RE;
-      case_result.message =
-          "标准输出超过上限 " +
-          std::to_string(options_.stdout_limit_bytes) + " 字节";
-    } else if (outputs_match(testcase.output, run_result.stdout_data)) {
-      case_result.status = JudgeStatus::AC;
-      ++result.passed;
-    } else {
-      case_result.status = JudgeStatus::WA;
-      case_result.message = "输出不匹配";
     }
-
-    if (case_result.status != JudgeStatus::AC) {
-      case_result.actual_output = run_result.stdout_data;
+    if (verdict.global_deadline_hit) {
+      case_result.message += "（" +
+                             std::to_string(options_.global_time_limit_ms) +
+                             " ms）";
     }
     result.cases.push_back(std::move(case_result));
+
+    if (verdict.abort_remaining) {
+      if (run_result.cancelled) {
+        mark_cancelled();
+      } else if (run_result.launch_error) {
+        break; // 系统/策略故障：无法继续可靠判题，提前终止
+      } else {
+        mark_global_exhausted();
+      }
+      break;
+    }
   }
 
   // 5. 汇总。全局硬上限或服务取消终止时按内部错误处理，覆盖逐点汇总结果，

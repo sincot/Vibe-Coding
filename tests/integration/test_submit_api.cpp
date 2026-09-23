@@ -94,6 +94,8 @@ public:
   std::string run_output;
   int run_exit_code = 0;
   long long run_time_ms = 1;
+  // 每次运行上报的峰值 RSS（kB）；0 表示未采集。用于验证提交级内存为各点最大值。
+  long long run_memory_kb = 0;
 
   bool use_source_marker_output = false;
 
@@ -156,6 +158,7 @@ public:
     result.exit_code = run_exit_code;
     result.stdout_data = output;
     result.time_ms = run_time_ms;
+    result.memory_kb = run_memory_kb;
     return result;
   }
 
@@ -481,8 +484,13 @@ void test_real_cpp17_and_c11_ac() {
     check(body.contains("results") && body["results"].is_array() &&
               body["results"].size() == 3,
           "返回 3 个逐点结果");
-    check(body["memory_kb"].is_null(), "未采集内存明确表示为 null");
+    check(body.contains("memory_kb") && body["memory_kb"].is_number() &&
+              body["memory_kb"].get<long long>() > 0,
+          "真实运行采集到峰值内存（数值，非 null）");
     check(body.value("runtime_ms", -1LL) >= 0, "返回耗时");
+    check(body.contains("compile_time_ms") &&
+              body["compile_time_ms"].is_number(),
+          "返回编译耗时（独立于运行耗时）");
     bool no_leak = true;
     for (const auto &item : body["results"]) {
       if (item.value("status", "") != "AC" || item.contains("input") ||
@@ -512,6 +520,7 @@ void test_real_cpp17_and_c11_ac() {
   check(found && !record.created_at.empty(), "提交时间已记录");
   check(found && record.per_case.find("\"index\"") != std::string::npos,
         "逐点结果 JSON 已入库");
+  check(found && record.memory_kb > 0, "峰值内存在提交记录中入库");
 }
 
 // ---------------------------------------------------------------------------
@@ -712,7 +721,45 @@ void test_compile_msg_and_runtime_persisted() {
     check(found && record.runtime_ms == 14, "逐点耗时求和入库（14ms）");
     check(found && record.memory_kb == 0,
           "未采集内存以 0 哨兵入库（响应侧为 null）");
+    check(ac && json::parse(ac->body)["memory_kb"].is_null(),
+          "未采集时响应 memory_kb 为 null");
   }
+}
+
+// 提交级 memory_kb 取各点峰值 RSS 的最大值（不是求和）。
+void test_memory_aggregation_is_max_not_sum() {
+  std::cout << "提交级内存为逐点峰值最大值（非求和）\n";
+  FakeExecutor fake;
+  fake.run_output = "2\n";
+  fake.run_memory_kb = 1000;
+  Env env("sub_memagg", "", &fake);
+  check(env.ok(), "服务启动成功");
+  httplib::Client cli = make_client(env.port());
+
+  User user = make_user(cli, env.db(), "memagg_user", "MemAggPw1");
+  std::int64_t problem_id = insert_problem(env.db(), "内存汇总题", 1);
+  // 两个测试点，FakeExecutor 每点上报 1000 kB：最大值应为 1000 而非 2000。
+  insert_testcase(env.db(), problem_id, 0, "1 1\n", "2\n", false);
+  insert_testcase(env.db(), problem_id, 1, "2 2\n", "2\n", false);
+
+  auto res = submit(cli, user.token, std::to_string(problem_id), "cpp17", "x");
+  check(res && json::parse(res->body).value("status", "") == "AC", "判为 AC");
+  std::int64_t id = 0;
+  if (res) {
+    json body = json::parse(res->body);
+    id = body.value("id", 0LL);
+    check(body["memory_kb"].is_number() &&
+              body["memory_kb"].get<long long>() == 1000,
+          "响应 memory_kb 为峰值最大值 1000（非 2000）");
+  }
+  oj::SubmissionStore store(env.db());
+  bool found = false;
+  oj::SubmissionRecord record;
+  std::string err;
+  store.find_by_id(id, found, record, err);
+  check(found && record.memory_kb == 1000, "入库 memory_kb 为 1000（非求和）");
+  check(found && record.per_case.find("\"memory_kb\":1000") != std::string::npos,
+        "逐点结果记录各点内存");
 }
 
 // ---------------------------------------------------------------------------
@@ -1320,6 +1367,7 @@ int main() {
   test_real_tle_and_re();
   test_language_case_insensitive_and_canonical();
   test_compile_msg_and_runtime_persisted();
+  test_memory_aggregation_is_max_not_sum();
   test_empty_testcase_is_syserr();
   test_rejections_do_not_persist();
   test_admin_can_submit_hidden();

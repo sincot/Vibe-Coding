@@ -262,8 +262,9 @@ M3.3 **不新增系统包**。seccomp 过滤器以手写经典 BPF（`linux/secc
   墙钟 watchdog 双保险。
 - **内存**：**不设置 `RLIMIT_AS`**（ASan/UBSan 会预留海量虚拟地址空间，设置后
   启动即失败）。改以 20ms 周期采样用户进程 RSS，超限即 `SIGKILL` 整个进程组并标记
-  `memory_exceeded` → 判题核心据此判 `MLE`；观测峰值写入逐点结果供 M3.4 分类。
-  编译阶段按进程组汇总 RSS（覆盖 `cc1plus`/`as`/`ld`）。
+  `memory_exceeded` → 判题核心据此判 `MLE`；观测峰值写入逐点结果，作为 M3.4 判
+  `MLE` 的唯一可靠证据（无 RSS 证据的 SIGKILL/分配失败不判 MLE）。编译阶段按进程组
+  汇总 RSS（覆盖 `cc1plus`/`as`/`ld`）。
 - **文件/栈/描述符**：`RLIMIT_FSIZE`、`RLIMIT_STACK`、`RLIMIT_NOFILE`、`RLIMIT_CORE=0`。
 - **输出**：标准输出 64 KiB、标准错误 16 KiB、编译诊断 64 KiB，采集时按字节上限
   截断并继续排空管道（不先无限读取），截断不判为 AC，采集不挂死。
@@ -306,4 +307,78 @@ M3.3 **不新增系统包**。seccomp 过滤器以手写经典 BPF（`linux/secc
 > 本机（4 vCPU / 3.3 GiB，无 swap）实测：全量串行 `ctest` 期间系统已用峰值约
 > 2.1 GiB（含开发工具约占 0.9 GiB），剩余可用最低约 1.0 GiB；4 路并发真实判题
 > （编译门限 2）在 1 秒内全部 AC，无异常。
+
+---
+
+## 9. 编译模板、Sanitizer 与结果分类（M3.4）
+
+### 9.1 编译模板（`LocalExecutor::compile`）
+
+两套语言均以参数数组 `execve` 启动，绝不经过 shell，用户源码与请求参数不能改变
+编译器路径或注入额外命令。选项由执行器集中维护：
+
+- C++17：`g++ -O2 -std=c++17 <src> -o <program> -lm`
+- C11：`gcc -O2 -std=c11 <src> -o <program> -lm`
+- 默认叠加：`-fsanitize=address,undefined -fno-omit-frame-pointer
+  -fno-sanitize-recover=all`
+
+`-fno-sanitize-recover=all` 使 UBSan 一旦报告未定义行为即中止（`abort`），避免
+「已报告 UB 但继续执行、输出碰巧匹配被误判 AC」。运行阶段环境固定
+`ASAN_OPTIONS=detect_leaks=0`、`UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1`
+（关闭 LeakSanitizer 以兼容「禁 ptrace/禁创建进程」的 seccomp 策略）。`JudgeOptions`
+的 `sanitizers_enabled`（默认 `true`）统一开关；测试可显式关闭以验证基础流程。
+
+### 9.2 结构化原因与分类规则
+
+执行层（`LocalExecutor`）在 `ProcessResult` 记录单一权威的 `TerminationReason`
+（`Completed/NonZeroExit/Signaled/TimedOut/MemoryExceeded/Cancelled/LaunchFailure`）
+与疑似 Sanitizer 标注；分类层 `classify_case`（`src/judge/classification.{h,cpp}`）
+据此统一判定，规则（确定性优先级）：
+
+1. 取消 → `SYSERR`（中止剩余）；
+2. 启动/沙箱失败 → `SYSERR`（中止剩余）；
+3. 可靠 RSS 证据超限 → `MLE`；
+4. 全局预算裁剪导致的超时 → `TLE` + `global_deadline_hit`（中止剩余）；
+5. 单点超时 → `TLE`（继续后续点）；
+6. 信号终止/非正常退出/非零退出码 → `RE`；
+7. 标准输出超限 → `RE`（沿用 SPEC JUDGE-05，不新增 OLE）；
+8. 正常执行、输出未超限且归一化匹配 → `AC`；
+9. 其余 → `WA`。
+
+单点仅凭用户可打印的 stderr 文本（含类似 `AddressSanitizer` 字样）不判失败；只有
+实际异常退出/非零退出码才判 `RE`。逐点汇总按 `SYSERR > TLE > MLE > RE > WA > AC`
+取最严重者，零测试点固定 `SYSERR`；全局硬上限或服务取消会覆盖为 `SYSERR`，已获得
+的逐点结果保留、未执行点不伪造。
+
+### 9.3 指标口径
+
+- **逐点 `time_ms`**：该点子进程启动到回收的墙钟经过时间（毫秒），不含排队与编译；
+- **逐点 `memory_kb`**：20ms 周期采样的峰值 RSS（kB），未采集到为 `null`；
+- **提交级 `runtime_ms`**：各点 `time_ms` 之和（**不含排队与编译**）；
+- **提交级 `memory_kb`**：各点峰值 RSS 的**最大值**（非求和）；未采集到为 `null`；
+- **`compile_time_ms`**：编译阶段墙钟耗时，独立字段，不混入运行耗时。
+
+### 9.4 WA 反馈边界
+
+仅在**整体 WA 的失败点**通过 `POST /api/problems/{id}/submit` 的响应向提交者返回
+该点的 `input`/`expected_output`/`actual_output`（另含结构化 `reason` 与诊断）；
+通过点只含 `index/status/time_ms/memory_kb`，绝不附带隐藏输入或标准答案。原始输出
+文本原样保留，归一化仅用于比对。响应只返回给提交者本人（管理员可经提交详情访问）。
+
+### 9.5 M3.4 实测（本机 3.3 GiB，无 swap）
+
+- 构建：`cmake --build build --parallel 1`（单并发），成功。
+- 新增/更新测试：`judge_classification_unit`（22 项 gtest）、`m34_classification`
+  （真实进程，覆盖默认 ASan/UBSan 模板的 AC/WA/CE、越界/UB 判失败、伪 Sanitizer 文本
+  不误判、TLE/RE/MLE、输出与诊断上限、编译器故障 `SYSERR` 后恢复、混合优先级、指标
+  口径）；`sandbox_integration` 的 UBSan 期望由「可恢复诊断判 AC」更新为「不可恢复
+  判失败」。
+- 全量回归：`ctest --test-dir build`（串行）**34/34 通过**，总耗时约 156s。
+- 5 用户并发持续提交（`submit_scheduling_api` 的 `test_five_users_sustained_concurrency`）：
+  5 名用户并发、连续 3 轮共 15 次真实 ASan 判题（AC/WA 交替），编译门限 2、worker=5，
+  结果互不混用、计数一致、无遗留子进程；实测最低可用内存约 **737 MiB**，无 OOM。
+  该场景据此前的「长时间压测」范围收敛为产品目标规模（5 人同时）；超出该目标的更高
+  并发尚未验证。
+- 资源：全量回归期间可用内存最低约 850 MiB，始终高于预留保护线；构建与测试均单并发，
+  未出现 OOM/卡顿。ASan 编译为单/双并发（受编译门限约束，测试叠加并发受控）。
 

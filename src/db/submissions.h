@@ -9,8 +9,9 @@ class Database;
 
 // 一条提交流水记录（含完整用户源码与逐点结果 JSON）。
 //
-// memory_kb：M1.6 的判题器尚未采集内存用量，该字段固定写入 0 表示「未采集」，
-// 不伪造测量结果；对外响应明确以 null 表示未采集。M3 完整化后（M3.4）再写入真实值。
+// runtime_ms：各测试点程序执行耗时之和（不含排队与编译）。
+// memory_kb：各测试点观测峰值 RSS 的最大值；0 表示「未采集」，对外响应以 null
+// 表示，绝不用 0 伪装真实测量值。
 struct SubmissionRecord {
   std::int64_t id = 0;
   std::int64_t user_id = 0;

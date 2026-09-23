@@ -991,9 +991,14 @@ void HttpServer::handle_submit(const httplib::Request &req,
   body["passed"] = outcome.judge.passed;
   body["total"] = outcome.judge.total;
   body["runtime_ms"] = saved.runtime_ms;
-  body["memory_kb"] = nullptr; // 未采集（M1.6 判题器不采集内存）
+  // 采集到峰值 RSS 时返回数值；未采集到（如编译失败或采样失败）返回 null，
+  // 明确区分「未采集」与真实的 0。单位 kB。
+  body["memory_kb"] =
+      saved.memory_kb > 0 ? json(saved.memory_kb) : json(nullptr);
+  body["compile_time_ms"] = outcome.judge.compile_time_ms;
   body["compile_ok"] = outcome.judge.compile_ok;
   body["compile_output"] = saved.compile_msg;
+  body["compile_output_truncated"] = outcome.judge.compile_output_truncated;
   body["message"] = outcome.judge.message;
   body["created_at"] = saved.created_at;
   try {

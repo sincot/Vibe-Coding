@@ -44,9 +44,12 @@ struct JudgeOptions {
   // 全局编译并发门限（可选）。非空时，单次判题在编译前获取许可，等待计入本次
   // 判题的全局硬上限并可被取消；编译结束立即释放。为空表示不限制（测试/单任务）。
   std::shared_ptr<CompileGate> compile_gate;
-  // 额外的编译选项（追加在语言标准选项之后）。供 M3.4 接入 ASan/UBSan 或测试注入
-  // 使用；为空时保持当前编译选项不变。
+  // 额外的编译选项（追加在语言标准选项之后）。供测试注入或特殊场景使用；
+  // 为空时保持当前编译选项不变。ASan/UBSan 由 sanitizers_enabled 统一控制。
   std::vector<std::string> extra_compile_flags;
+  // 是否在编译模板中启用 ASan/UBSan（SPEC JUDGE-01，默认全开）。正式服务始终为
+  // true；仅测试可显式关闭以验证不含 Sanitizer 的基础流程。
+  bool sanitizers_enabled = true;
 };
 
 // 判题任务。判题核心不依赖 HTTP，也不负责任何提交记录入库。
@@ -62,12 +65,15 @@ struct JudgeTask {
 struct TestcaseResult {
   int index = 0; // 执行顺序（0 起）
   JudgeStatus status = JudgeStatus::AC;
-  long long time_ms = 0;
+  long long time_ms = 0;         // 该点程序执行墙钟耗时（毫秒），不含排队/编译
   long long memory_kb = 0;       // 观测峰值 RSS（kB），0 表示未采集到
   bool memory_exceeded = false;  // 因 RSS 超限被强制终止
   bool timed_out = false;
   bool output_truncated = false; // 标准输出超过上限
   bool global_deadline_hit = false; // 该点因全局硬上限（而非单点时限）被终止
+  // 执行层记录的结构化终止原因（单一权威来源）与疑似 Sanitizer 标注，供诊断。
+  TerminationReason termination = TerminationReason::LaunchFailure;
+  bool sanitizer_error = false;
   int exit_code = 0;
   int term_signal = 0;
   // 非 AC 时保留实际输出，供 WA 反馈与诊断；有界，最多 stdout_limit_bytes。
@@ -80,7 +86,10 @@ struct TestcaseResult {
 struct JudgeResult {
   JudgeStatus status = JudgeStatus::SYSERR;
   bool compile_ok = false;
-  std::string compile_output; // 有界编译诊断
+  std::string compile_output; // 有界编译诊断（已清洗内部路径）
+  // 编译诊断是否因超过采集上限被截断（截断时明确标识，不静默丢弃）。
+  bool compile_output_truncated = false;
+  long long compile_time_ms = 0; // 编译阶段墙钟耗时（毫秒），不含排队
   std::vector<TestcaseResult> cases;
   int total = 0;
   int passed = 0;

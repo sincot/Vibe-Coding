@@ -35,5 +35,25 @@ const char *language_name(Language language) {
   return "unknown";
 }
 
+const char *termination_reason_name(TerminationReason reason) {
+  switch (reason) {
+  case TerminationReason::Completed:
+    return "completed";
+  case TerminationReason::NonZeroExit:
+    return "non_zero_exit";
+  case TerminationReason::Signaled:
+    return "signaled";
+  case TerminationReason::TimedOut:
+    return "timed_out";
+  case TerminationReason::MemoryExceeded:
+    return "memory_exceeded";
+  case TerminationReason::Cancelled:
+    return "cancelled";
+  case TerminationReason::LaunchFailure:
+    return "launch_failure";
+  }
+  return "launch_failure";
+}
+
 } // namespace judge
 } // namespace oj

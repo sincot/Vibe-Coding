@@ -62,8 +62,13 @@ export function renderJudgeResult(container, result) {
   }
 
   const metaParts = [];
-  metaParts.push("总耗时 " + timeText(result.runtime_ms));
-  metaParts.push("内存 " + memoryText(result.memory_kb));
+  // 提交级耗时只统计程序执行时间（不含排队与编译）；编译耗时单独展示，
+  // 不把排队/编译时间混入运行耗时字段。
+  metaParts.push("运行耗时 " + timeText(result.runtime_ms));
+  if (typeof result.compile_time_ms === "number") {
+    metaParts.push("编译耗时 " + timeText(result.compile_time_ms));
+  }
+  metaParts.push("峰值内存 " + memoryText(result.memory_kb));
   if (result.created_at) metaParts.push("提交时间 " + result.created_at);
 
   container.appendChild(h("h3", { text: "判题结果" }));

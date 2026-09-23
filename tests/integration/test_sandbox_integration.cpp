@@ -15,7 +15,8 @@
 //   - CPU 超时、内存超限被实际强制（非常数值采集），且之后仍可正常判题；
 //   - 标准输出 64KB 上限：接近/等于上限仍 AC，超过上限不判 AC；
 //   - 大量标准错误有界采集且不挂死；
-//   - ASan/UBSan 兼容：正常样例运行，越界样例产生 AddressSanitizer 诊断；
+//   - ASan/UBSan 默认接入：正常样例运行，越界样例产生 AddressSanitizer 诊断，
+//     不可恢复的未定义行为导致失败（不判 AC）；
 //   - 沙箱/工作目录失败时明确 SYSERR，绝不无保护执行；
 //   - 环境不泄露服务密钥；各路径无遗留子进程与临时目录。
 //
@@ -406,17 +407,15 @@ void test_large_stderr_no_hang() {
 }
 
 void test_sanitizer_compatibility() {
-  std::cout << "ASan/UBSan 与沙箱/内存限制兼容\n";
+  std::cout << "ASan/UBSan 默认接入与沙箱/内存限制兼容\n";
   TempDir root("sb_asan");
-  const std::vector<std::string> flags = {"-fsanitize=address,undefined",
-                                          "-fno-omit-frame-pointer",
-                                          "-fno-sanitize-recover=address"};
 
+  // 使用 M3.4 的默认生产编译模板（ASan/UBSan 全开 + -fno-sanitize-recover=all），
+  // 不注入额外选项，从而验证真实采用的编译配置。
   // 正常样例：ASan 预留海量虚拟地址空间，若误设 RLIMIT_AS 会在启动阶段崩溃。
   // 这里给出 256MB 的 RSS 上限（而非地址空间），验证 ASan 正常启动并 AC。
   JudgeResult normal = judge_src("cpp17", kCppSum, {{"1 2\n", "3\n"}}, 4000,
-                                 root.path(), /*memory_limit_kb=*/262144,
-                                 flags);
+                                 root.path(), /*memory_limit_kb=*/262144);
   check(normal.status == JudgeStatus::AC,
         "ASan/UBSan 正常样例在沙箱中编译运行并 AC");
 
@@ -430,8 +429,8 @@ void test_sanitizer_compatibility() {
       "  std::printf(\"%d\\n\", p[8]);\n"
       "  return 0;\n"
       "}\n";
-  JudgeResult bad = judge_src("cpp17", oob, {{"", "42\n"}}, 4000, root.path(),
-                              262144, flags);
+  JudgeResult bad =
+      judge_src("cpp17", oob, {{"", "42\n"}}, 4000, root.path(), 262144);
   check(bad.status == JudgeStatus::RE, "受控越界样例判为 RE");
   const TestcaseResult *cs = first_case(bad);
   const bool has_asan =
@@ -441,7 +440,8 @@ void test_sanitizer_compatibility() {
        contains(cs->stderr_output, "runtime error"));
   check(has_asan, "采集到 AddressSanitizer/运行时诊断");
 
-  // UBSan 可恢复诊断：不改变正常输出，但诊断被采集。
+  // 带未定义行为的样例：-fno-sanitize-recover=all 使其不可恢复，必须导致失败
+  //（而非打印诊断后继续执行、输出匹配被误判 AC）。
   const char *ub =
       "#include <cstdio>\n"
       "int main(){\n"
@@ -451,9 +451,10 @@ void test_sanitizer_compatibility() {
       "  std::printf(\"OK\\n\");\n"
       "  return 0;\n"
       "}\n";
-  JudgeResult ubsan = judge_src("cpp17", ub, {{"", "OK\n"}}, 4000, root.path(),
-                                262144, flags);
-  check(ubsan.status == JudgeStatus::AC, "UBSan 可恢复诊断不误判");
+  JudgeResult ubsan =
+      judge_src("cpp17", ub, {{"", "OK\n"}}, 4000, root.path(), 262144);
+  check(ubsan.status != JudgeStatus::AC,
+        "不可恢复的未定义行为不判 AC（Sanitizer 生效）");
   const TestcaseResult *ucs = first_case(ubsan);
   check(ucs != nullptr && contains(ucs->stderr_output, "runtime error"),
         "采集到 UBSan 运行时诊断");

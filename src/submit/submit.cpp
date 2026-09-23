@@ -20,7 +20,8 @@ namespace {
 // 或标准答案。WA 测试点按 SPEC PRB-05 / JUDGE-07 附上该失败点的输入、期望输出与
 // 用户实际输出；其它非 AC 点附上有界诊断（消息 / 实际输出 / 标准错误）。
 //
-// memory_kb 固定为 null：M1.6 判题器未采集内存，明确表示为未采集而非伪造 0。
+// memory_kb：已通过 RSS 采样测得时给出数值；未采集到（如编译失败、进程未运行或
+// 采样失败）保持 null，明确区分「未采集」与真实的 0。
 nlohmann::json build_per_case(const judge::JudgeTask &task,
                               const judge::JudgeResult &result) {
   using nlohmann::json;
@@ -41,6 +42,12 @@ nlohmann::json build_per_case(const judge::JudgeTask &task,
       entry["global_deadline_hit"] = true;
     }
     if (item.status != judge::JudgeStatus::AC) {
+      // 结构化终止原因（执行层单一权威来源），便于分类透明与前端展示。
+      entry["reason"] =
+          judge::termination_reason_name(item.termination);
+      if (item.sanitizer_error) {
+        entry["sanitizer_error"] = true;
+      }
       entry["exit_code"] = item.exit_code;
       entry["term_signal"] = item.term_signal;
       if (!item.message.empty()) {
@@ -218,9 +225,17 @@ SubmitService::Outcome SubmitService::submit(std::int64_t user_id,
     judge_result.message = "判题内部错误";
   }
 
+  // 提交级指标汇总口径（单位：毫秒 / 千字节，均为整数）：
+  //   - runtime_ms：各测试点**程序执行**墙钟耗时之和（不含排队与编译）；
+  //   - memory_kb：各测试点观测峰值 RSS 的最大值（不是求和）；无任何测量时保持
+  //     0 作为「未采集」哨兵，对外响应以 null 表示，绝不用 0 伪装真实测量值。
   long long total_runtime_ms = 0;
+  long long peak_memory_kb = 0;
   for (const judge::TestcaseResult &item : judge_result.cases) {
     total_runtime_ms += item.time_ms;
+    if (item.memory_kb > peak_memory_kb) {
+      peak_memory_kb = item.memory_kb;
+    }
   }
   const bool accepted = judge_result.status == judge::JudgeStatus::AC;
 
@@ -233,7 +248,7 @@ SubmitService::Outcome SubmitService::submit(std::int64_t user_id,
   record.per_case = build_per_case(task, judge_result).dump();
   record.compile_msg = judge_result.compile_output;
   record.runtime_ms = total_runtime_ms;
-  record.memory_kb = 0; // 未采集（对外以 null 表示）
+  record.memory_kb = peak_memory_kb;
   // 采用调度器接受入队时采集的原始提交时间；排队等待不计入该时间戳。
   record.created_at = submitted_at.empty() ? utc_timestamp_now() : submitted_at;
 

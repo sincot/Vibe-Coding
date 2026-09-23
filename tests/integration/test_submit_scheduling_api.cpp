@@ -44,6 +44,7 @@
 #include "db/submissions.h"
 #include "db/users.h"
 #include "http/server.h"
+#include "judge/compile_gate.h"
 #include "judge/executor.h"
 #include "judge/manager.h"
 #include "submit/submit.h"
@@ -814,6 +815,115 @@ void test_real_compile_concurrent() {
 }
 
 // ---------------------------------------------------------------------------
+// T-023：5 用户并发持续提交（原「数十人长时间压测」的受控替代范围）
+// ---------------------------------------------------------------------------
+
+// 5 名用户，3 轮同时提交（共 15 次真实 ASan 判题），验证：结果互不混用、计数一致、
+// 无遗留进程。编译阶段并发门限设为 2（与正式服务默认一致），运行阶段 worker=5；
+// 内存占用受控，不使用超大分配或死循环。
+void test_five_users_sustained_concurrency() {
+  std::cout << "5 用户并发持续提交：结果正确、计数一致、无遗留\n";
+  TempDir workspace("sched_five_ws");
+  oj::judge::JudgeOptions options;
+  options.workspace_root = workspace.sub("judge");
+  options.compile_gate = std::make_shared<oj::judge::CompileGate>(2);
+  Env env("sched_five", nullptr, options, JudgeManager::Options(64, 5));
+  check(env.ok(), "服务启动成功");
+  const int port = env.port();
+
+  const int kUsers = 5;
+  const int kRounds = 3;
+  const char *kCppSum =
+      "#include <iostream>\n"
+      "int main(){ long long a,b; if(!(std::cin>>a>>b)) return 0; "
+      "std::cout<<(a+b)<<\"\\n\"; return 0; }\n";
+  const char *kWrong = "#include <cstdio>\n"
+                       "int main(){ long long a,b; "
+                       "if(scanf(\"%lld %lld\",&a,&b)!=2) return 0; "
+                       "printf(\"0\\n\"); return 0; }\n";
+
+  std::vector<User> users;
+  for (int i = 0; i < kUsers; ++i) {
+    httplib::Client setup = make_client(port);
+    users.push_back(make_user(setup, env.db(),
+                              "five_user_" + std::to_string(i),
+                              "FivePw" + std::to_string(i) + "x"));
+  }
+  bool users_ok = users.size() == static_cast<std::size_t>(kUsers);
+  for (const User &u : users) {
+    if (u.token.empty() || u.id == 0) {
+      users_ok = false;
+    }
+  }
+  check(users_ok, "5 名用户注册并登录成功");
+
+  std::int64_t pid = insert_problem(env.db(), "5 人并发题", 1, 2000);
+  insert_testcase(env.db(), pid, 0, "1 2\n", "3\n");
+  insert_testcase(env.db(), pid, 1, "100 -50\n", "50\n");
+  const std::string pid_text = std::to_string(pid);
+
+  std::atomic<int> failures{0};
+  std::atomic<long long> max_latency_ms{0};
+  for (int round = 0; round < kRounds; ++round) {
+    const bool ac_round = (round % 2 == 0);
+    const std::string code = ac_round ? kCppSum : kWrong;
+    const std::string expected = ac_round ? "AC" : "WA";
+    std::vector<std::string> results(kUsers);
+    std::vector<std::thread> threads;
+    for (int i = 0; i < kUsers; ++i) {
+      threads.emplace_back([&, i]() {
+        httplib::Client cli = make_client(port);
+        const auto started = std::chrono::steady_clock::now();
+        auto res = submit(cli, users[i].token, pid_text, "cpp17", code);
+        const long long elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started)
+                .count();
+        long long prev = max_latency_ms.load();
+        while (elapsed > prev &&
+               !max_latency_ms.compare_exchange_weak(prev, elapsed)) {
+        }
+        if (res && res->status == 200) {
+          results[i] = json::parse(res->body).value("status", "");
+        }
+      });
+    }
+    for (std::thread &t : threads) {
+      t.join();
+    }
+    for (int i = 0; i < kUsers; ++i) {
+      if (results[i] != expected) {
+        ++failures;
+        std::cout << "    [INFO] 轮 " << round << " 用户 " << i << " 期望 "
+                  << expected << " 实得 " << results[i] << "\n";
+      }
+    }
+  }
+  check(failures.load() == 0,
+        "5 用户 × 3 轮（15 次提交）结果均正确，无混用");
+  // 同步返回有界：满载（5 并发、编译门限 2）下任一提交都应在合理时间内返回，不挂死。
+  std::cout << "    [INFO] 5 用户并发下单次提交最长耗时 "
+            << max_latency_ms.load() << " ms\n";
+  check(max_latency_ms.load() > 0 && max_latency_ms.load() < 30000,
+        "5 用户并发下每次提交均在 30s 内同步返回（不挂死）");
+
+  bool counts_ok = true;
+  for (int i = 0; i < kUsers; ++i) {
+    oj::UserProblemStatusRecord st;
+    bool found = false;
+    read_status(env.db(), users[i].id, pid, found, st);
+    if (!found || st.submit_count != kRounds) {
+      counts_ok = false;
+    }
+  }
+  check(counts_ok, "每个用户提交计数正确（各 3 次）");
+
+  int status = 0;
+  pid_t leftover = ::waitpid(-1, &status, WNOHANG);
+  check(leftover <= 0, "5 用户持续提交后无遗留子进程");
+}
+
+// ---------------------------------------------------------------------------
 // T7：停止时排空已接收任务、数据库顺序安全
 // ---------------------------------------------------------------------------
 
@@ -1128,6 +1238,7 @@ int main() {
   test_first_ac_uses_earliest_original_time();
   test_queue_wait_not_counted_as_runtime();
   test_real_compile_concurrent();
+  test_five_users_sustained_concurrency();
   test_graceful_stop_drains_accepted_tasks();
   test_multi_user_multi_problem_no_mix();
   test_stop_cancels_running_real_judge();

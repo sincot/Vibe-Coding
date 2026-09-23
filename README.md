@@ -23,8 +23,9 @@
 - [x] M3.1 判题任务调度（`JudgeManager` 有界等待队列 + `min(CPU 核数,8)` worker 线程池 + 每任务独立 future 结果通道 + 队列满载 503 立即拒绝 + 同步返回 + 停止排空回收；复用现有判题与持久化逻辑）
 - [x] M3.2 子进程与超时控制（fork/exec 与结果采集完善 + 单调时钟 watchdog + 单次判题全局 60s 硬上限 + 超时/取消 `SIGKILL` 进程组并由 `waitpid` 回收 + 服务停止取消与子进程清理）
 - [x] M3.3 运行隔离与资源限制（默认 tmpfs 工作目录 + `mkdtemp` 随机目录与安全清理 + user/mount/net/pid/ipc/uts 命名空间 + chroot 最小根目录 + 只读工作目录 + setrlimit CPU/文件/栈/fd/CORE + RSS 采样内存限制判 `MLE` + seccomp-bpf 禁网络/逃逸/进程创建/危险调用 + 64KB 输出上限 + 编译并发门限；真实 Linux 进程验证隔离、限制与 ASan/UBSan 兼容）
+- [x] M3.4 编译与结果分类（C++17/C11 生产编译模板默认接入 ASan/UBSan 且 UBSan 不可恢复 + 执行层结构化终止原因 + 统一分类 `AC/WA/CE/TLE/RE/MLE/SYSERR` + 可靠证据判 MLE + 逐点耗时/峰值内存与编译耗时采集 + WA 详情 + 编译诊断路径清洗与截断标识）
 
-后续阶段（Rejudge、ASan/UBSan 默认接入与完整分类、CodeMirror、完整搜索筛选分页页面）尚未实现。
+后续阶段（Rejudge、CodeMirror、完整搜索筛选分页页面、提交历史/排行榜页面）尚未实现。
 
 ## 环境要求
 
@@ -139,7 +140,8 @@ worker 上限、有界等待队列满载立即拒绝且并发入队不突破容�
 通过真实 HTTP 与受控/真实执行器覆盖：队列满载 503 + 稳定 code + Retry-After 且未接收
 不落库不计次、繁忙/满载时健康检查与题目查询仍可响应、执行器异常转 SYSERR 且 worker
 恢复、并发同题计数与首次 AC 取最早原提交时间、排队时间不计入运行耗时且不误判 TLE、
-真实 C++17/C11 并发判题结果正确且子进程无遗留、优雅停止取消已接收任务并交付明确结果。
+真实 C++17/C11 并发判题结果正确且子进程无遗留、优雅停止取消已接收任务并交付明确结果、
+5 用户并发持续提交（3 轮共 15 次真实判题）结果互不混用且计数一致。
 
 判题子进程与超时控制测试（M3.2，截止时间单元 + 判题/调度集成）：
 
@@ -165,8 +167,36 @@ ctest --test-dir build -R sandbox_integration --output-on-failure
 `sandbox_unit` 覆盖编译并发门限（上限/超时/取消/释放）、资源上限换算、seccomp 过滤器
 构建、命名空间与 tmpfs 能力探测、`Workspace` 清理安全（不越界、不跟随符号链接）。
 `sandbox_integration` 以真实 g++/gcc 与命名空间/chroot/seccomp 验证：正常 C++17/C11、
-目录与网络与进程隔离、CPU/内存/输出上限、ASan/UBSan 兼容与越界诊断、环境不泄露、
+目录与网络与进程隔离、CPU/内存/输出上限、ASan/UBSan 默认接入与越界/UB 诊断、环境不泄露、
 失败路径与遗留进程/目录清理。
+
+编译与结果分类测试（M3.4，纯函数单元 + 真实进程集成）：
+
+```bash
+ctest --test-dir build -R judge_classification_unit --output-on-failure
+ctest --test-dir build -R m34_classification --output-on-failure
+```
+
+`judge_classification_unit` 覆盖单点分类的确定性优先级（取消/启动失败/内存/全局裁剪/
+单点超时/信号/非零退出/输出超限/AC/WA）、多迹象并存、Sanitizer 文本不单独判失败、
+总体汇总的严重度与顺序无关性、编译诊断内部路径清洗。`m34_classification` 以真实
+g++/gcc 与沙箱验证：两套语言默认 ASan/UBSan 模板的 AC/WA/CE、行尾空白规则、越界与
+UB 判失败并保留诊断、伪 Sanitizer 文本不误判、TLE/RE/MLE（可靠 RSS 证据）、超大输出
+失败与截断、编译诊断有界、编译器缺失/不可执行 `SYSERR` 后恢复、用户链接错误判 `CE`、
+真实诊断不泄露内部路径、失败点后继续执行与混合优先级、逐点耗时/内存与编译耗时口径、
+提交级内存取逐点峰值最大值。
+
+5 用户并发持续提交验证（真实 ASan 判题，编译门限 2，worker=5）位于
+`submit_scheduling_api`：
+
+```bash
+ctest --test-dir build -R submit_scheduling_api --output-on-failure
+```
+
+`test_five_users_sustained_concurrency` 由 5 名用户并发提交、连续 3 轮（共 15 次真实
+判题，AC/WA 交替），验证结果互不混用、每用户计数一致、无遗留子进程；本机实测最低可用
+内存约 737 MiB，无 OOM。该场景据此前的「长时间压测」范围收敛为产品目标规模（5 人同时），
+超出该目标的更高并发尚未验证。
 
 管理员题目接口测试（M2.1，单元 + 集成，隔离临时库 + 随机端口 + 可注入执行器）：
 
@@ -330,8 +360,8 @@ OJ_JWT_SECRET="$(openssl rand -hex 32)" OJ_ADMIN_PASSWORD='请改为强密码' \
 - **输出安全**：题面、样例、昵称、编译信息与程序输出一律通过 `textContent`/`<pre>` 作为纯文本渲染，HTML 特殊字符不会被解释执行。
 - **响应式**：题目页左右两栏，窗口宽度 ≤ 900px 时改为上下排列；长题面与长输出可滚动阅读。
 
-> 安全边界：本阶段前端可提交并通过后端沙箱判题（M3.3），但 ASan/UBSan 默认接入与
-> 完整异常分类属 M3.4，尚不代表可安全公开运行任意不可信代码。
+> 安全边界：本阶段前端可提交并通过后端沙箱判题（M3.3），且自 M3.4 起默认全开
+> ASan/UBSan 并完成统一异常分类，但仍不代表可安全公开运行任意不可信代码。
 
 #### M1.7 前端验证
 
@@ -1031,22 +1061,34 @@ curl -i -X POST http://127.0.0.1:8080/api/problems/1/submit \
 
 ```
 {"id":12,"problem_id":1,"language":"cpp17","status":"AC","passed":5,"total":5,
- "runtime_ms":18,"memory_kb":null,"compile_ok":true,"compile_output":"",
+ "runtime_ms":18,"memory_kb":8420,"compile_time_ms":640,"compile_ok":true,
+ "compile_output":"","compile_output_truncated":false,
  "message":"全部测试点通过","created_at":"2026-09-21 12:00:00",
- "results":[{"index":0,"status":"AC","time_ms":3,"memory_kb":null},
-            {"index":1,"status":"AC","time_ms":4,"memory_kb":null}]}
+ "results":[{"index":0,"status":"AC","time_ms":3,"memory_kb":8000},
+            {"index":1,"status":"AC","time_ms":4,"memory_kb":8420}]}
 ```
 
 - `language`：仅接受 `cpp17`（C++17）与 `c11`（C11），大小写不敏感；其它取值返回
   `400`。入库保存规范小写值。
 - `code`：完整用户源码，原样送入编译与入库，不做裁剪或修改。
-- `status`：`AC/WA/CE/TLE/RE/MLE/SYSERR`。`runtime_ms` 为各测试点执行耗时之和。
-- `memory_kb`：**固定为 `null`**——M1.6 判题器尚未采集内存，明确表示未采集，不伪造
-  测量结果（真实内存采集在 M3.4）。
+- `status`：`AC/WA/CE/TLE/RE/MLE/SYSERR`。
+- 指标口径（单位分别为毫秒 ms 与千字节 KB，均为整数）：
+  - `runtime_ms` = 各测试点**程序执行**墙钟耗时之和，**不含排队等待与编译时间**；
+  - `memory_kb` = 各测试点观测峰值 RSS 的最大值（非求和）；未采集到时为 `null`，
+    绝不伪造为 0；
+  - `compile_time_ms` = 编译阶段墙钟耗时，单独展示，不混入 `runtime_ms`。
+- `memory_kb`（提交级）：已由 RSS 采样采集时返回数值，未采集到时返回 `null`。
+  逐点结果的 `memory_kb` 同理。
 - `results`：逐测试点结果。通过（AC）测试点只含 `index/status/time_ms/memory_kb`，
-  **绝不附带隐藏测试输入或标准答案**；`WA` 点按 SPEC PRB-05/JUDGE-07 附上该失败点的
-  `input`/`expected_output`/`actual_output`。仅本次提交者可见。
-- 编译失败返回 `status:"CE"` 并在 `compile_output` 给出编译器诊断，`results` 为空。
+  **绝不附带隐藏测试输入或标准答案**；非 AC 点含 `reason`（结构化终止原因，如
+  `non_zero_exit`/`signaled`/`timed_out`/`memory_exceeded`）、`exit_code`、
+  `term_signal`、`message`、`stderr_output` 等诊断；`WA` 点另按 SPEC PRB-05/JUDGE-07
+  附上该失败点的 `input`/`expected_output`/`actual_output`。仅本次提交者可见。
+- 编译失败返回 `status:"CE"` 并在 `compile_output` 给出编译器诊断（已清洗内部路径；
+  超限时 `compile_output_truncated` 为 `true`），`results` 为空。
+- 运行阶段全开 ASan/UBSan：越界、非法内存访问或不可恢复的未定义行为会导致非正常
+  退出，按 `RE` 处理并保留诊断，绝不因输出碰巧匹配而判 `AC`；用户自行打印的类似
+  文本不会单独导致失败。
 
 参数与权限规则：
 
@@ -1082,8 +1124,8 @@ curl -i -X POST http://127.0.0.1:8080/api/problems/1/submit \
   全局串行（详见「判题任务调度（M3.1）」）。
 
 > **安全边界（重要）**：自 M3.3 起判题在进程级沙箱中执行（tmpfs 随机目录 +
-> 命名空间/chroot + setrlimit/RSS 限制 + seccomp）。ASan/UBSan 的默认接入与完整异常
-> 分类属 M3.4，Rejudge 属 M3.6；受控样例通过不代表可安全公开运行任意不可信代码。
+> 命名空间/chroot + setrlimit/RSS 限制 + seccomp），自 M3.4 起默认全开 ASan/UBSan
+> 并完成统一异常分类；Rejudge 属 M3.6。受控样例通过不代表可安全公开运行任意不可信代码。
 
 ### 判题任务调度（M3.1）
 
@@ -1123,8 +1165,8 @@ curl -i -X POST http://127.0.0.1:8080/api/problems/1/submit \
   关闭顺序错误。
 - **配置与限制**：`OJ_JUDGE_QUEUE_CAPACITY` 见「配置方式」。全局 60s 硬上限、强制终止与
   服务停止取消见 M3.2；运行隔离与资源限制（tmpfs/随机目录/chroot/setrlimit/seccomp/
-  输出上限/编译并发门限）见 M3.3 与下文「运行隔离与资源限制（M3.3）」。M3.4 完整分类/
-  Sanitizer 默认接入、M3.6 Rejudge 尚未实现。
+  输出上限/编译并发门限）见 M3.3 与下文「运行隔离与资源限制（M3.3）」。M3.4 完整分类与
+  Sanitizer 默认接入已完成；M3.6 Rejudge 尚未实现。
 
 ### 运行隔离与资源限制（M3.3）
 
@@ -1216,9 +1258,9 @@ result.status;                              // AC/WA/CE/TLE/RE/MLE/SYSERR
   子进程（含后代进程组）并删除本次临时目录；不以系统范围的进程名匹配清理。
 
 > **安全边界**：M3.3 已提供进程级隔离与资源限制（命名空间 + chroot + seccomp +
-> setrlimit/RSS 限制 + tmpfs 随机目录 + 输出上限），并以真实 Linux 进程受控样例验证。
-> 但 ASan/UBSan 的默认接入与完整异常分类属 M3.4，且受控样例通过不代表可安全公开运行
-> 任意不可信代码；仍需 M3.4/M3.5/M5 的完整回归与验收。
+> setrlimit/RSS 限制 + tmpfs 随机目录 + 输出上限），M3.4 已默认全开 ASan/UBSan 并
+> 完成统一异常分类，均以真实 Linux 进程受控样例验证。但受控样例通过不代表可安全公开
+> 运行任意不可信代码；仍需 M3.5/M5 的完整回归与验收。
 
 ### 登录限速
 

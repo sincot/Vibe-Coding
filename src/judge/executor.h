@@ -23,6 +23,28 @@ bool parse_language(const std::string &text, Language &out);
 // 语言的规范名称（"cpp17" / "c11"）。
 const char *language_name(Language language);
 
+// 执行层记录的「结构化终止原因」。判题核心据此统一分类，避免各处执行路径各自
+// 用布尔组合随意判定。优先级越高（越靠前）越优先，用于同一进程同时出现多个
+// 迹象时（如内存超限与超时临界）给出确定结果。
+//   Completed      正常退出（退出码 0）
+//   MemoryExceeded 依据可靠的 RSS 采样证据超限并强制终止
+//   TimedOut       watchdog 单点/全局时间上限强制终止
+//   Cancelled      服务停止主动取消（非用户程序超时）
+//   NonZeroExit    正常结束但退出码非 0
+//   Signaled       被信号终止（崩溃等；非上述主动终止）
+//   LaunchFailure  进程/沙箱未能启动（环境或策略故障）
+enum class TerminationReason {
+  LaunchFailure = 0,
+  Cancelled,
+  MemoryExceeded,
+  TimedOut,
+  Signaled,
+  NonZeroExit,
+  Completed,
+};
+
+const char *termination_reason_name(TerminationReason reason);
+
 // 一次子进程执行的结果。进程退出状态、资源限制触发情况与有界采集的输出全部
 // 记录在此，由判题核心据此映射为 JudgeStatus。
 struct ProcessResult {
@@ -33,6 +55,9 @@ struct ProcessResult {
   // 沙箱初始化（命名空间/挂载/资源限制/seccomp）失败。属于内部/策略故障，
   // 绝不降级为无保护执行；由判题核心映射为 SYSERR 并保留诊断证据。
   bool sandbox_error = false;
+
+  // 执行层记录的结构化终止原因（单一权威来源），供分类层统一处理。
+  TerminationReason termination = TerminationReason::LaunchFailure;
 
   bool timed_out = false; // 是否因超过时间限制被强制终止
   bool cancelled = false; // 是否因服务停止被主动取消（非用户程序超时）
@@ -48,6 +73,11 @@ struct ProcessResult {
   bool stdout_truncated = false; // 标准输出超过上限，已截断
   bool stderr_truncated = false; // 标准错误超过上限，已截断
 
+  // 仅在进程异常终止（信号/非零退出）时，依据诊断内容标注疑似 Sanitizer 报告，
+  // 用于补充诊断文案。**不参与状态判定**：不能仅凭用户可自行打印的 stderr 文本
+  // 把一次正常执行判为失败，也不能忽略实际退出状态。
+  bool sanitizer_error = false;
+
   std::string stdout_data; // 有界采集的标准输出（编译时可能包含合并后的诊断）
   std::string stderr_data; // 有界采集的标准错误
 
@@ -62,7 +92,10 @@ struct CompileRequest {
   std::string source_path;      // 源码文件路径
   std::string output_path;      // 生成的可执行文件路径
   std::string working_directory; // 编译进程工作目录
-  std::vector<std::string> extra_flags; // 预留：M3.4 接入 ASan/UBSan 等选项
+  std::vector<std::string> extra_flags; // 预留：测试/扩展注入的额外编译选项
+  // 是否在编译模板中启用 ASan/UBSan（SPEC JUDGE-01）。默认为真；测试可显式关闭
+  // 以仅验证基础编译流程。执行器负责选择确切的 sanitizer 选项，调用方不拼接命令。
+  bool sanitizers = true;
   int time_limit_ms = 10000;    // 编译保护超时（可能已被剩余全局预算裁剪）
   std::size_t output_limit_bytes = 64 * 1024; // 诊断信息采集上限
   // 编译阶段是否启用沙箱（命名空间最小根 + setrlimit + seccomp 禁网络/危险调用）。

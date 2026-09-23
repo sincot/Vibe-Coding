@@ -7,7 +7,7 @@
 
 ## 1. 项目概述
 
-一个面向**教学班（数十人同时）**的仿 LeetCode 在线判题系统。发布题目 → 学生浏览/做题 → 在线判题（标准 ACM 模式）→ 保存提交记录与做题状态 → 排行榜。项目由 Vibe-Coding 协作完成。
+一个面向**教学班（5 人同时）**的仿 LeetCode 在线判题系统。发布题目 → 学生浏览/做题 → 在线判题（标准 ACM 模式）→ 保存提交记录与做题状态 → 排行榜。项目由 Vibe-Coding 协作完成。
 
 ### 成功标准
 - 功能完整、可在一台 Linux 机器上一键运行。
@@ -116,7 +116,7 @@
 ### 2.7 非功能需求
 | 类别 | 要求 |
 |---|---|
-| 性能 | 教学班数十人同时提交，单机可扛；同步返回足够快（一个典型提交 < 数秒） |
+| 性能 | 教学班 5 人同时提交，单机可扛；同步返回足够快（一个典型提交 < 数秒） |
 | 安全 | JWT + 密码哈希；admin 首登强制改密；seccomp 禁网络/文件；tmpfs 目录隔离；登录限速；输出限长 |
 | 可靠性 | SYSERR 不假死；子进程必回收；WAL + cron 备份 |
 | 日志 | 提交结果全量落库；服务侧运行日志 |
@@ -1048,13 +1048,68 @@ Vibe-Coding/
 
 #### M3.4 编译与结果分类
 
-- [ ] 完善 C++17、C11 两套编译模板及规定的编译选项。
-- [ ] 接入 ASan/UBSan，采集诊断信息。
-- [ ] 完善 AC、WA、CE、TLE、RE、MLE、SYSERR 分类。
-- [ ] 采集并汇总耗时、内存和编译信息。
-- [ ] 编译成功后执行全部测试点，单点失败继续；触发全局硬上限或无法继续的系统故障时终止，并返回对应状态及已获得的逐点结果。
-- [ ] 为 WA 测试点附加输入、期望输出与实际输出。
-- [ ] 验证编译环境等内部故障返回 SYSERR，不使服务假死。
+- [x] 完善 C++17、C11 两套编译模板及规定的编译选项。
+- [x] 接入 ASan/UBSan，采集诊断信息。
+- [x] 完善 AC、WA、CE、TLE、RE、MLE、SYSERR 分类。
+- [x] 采集并汇总耗时、内存和编译信息。
+- [x] 编译成功后执行全部测试点，单点失败继续；触发全局硬上限或无法继续的系统故障时终止，并返回对应状态及已获得的逐点结果。
+- [x] 为 WA 测试点附加输入、期望输出与实际输出。
+- [x] 验证编译环境等内部故障返回 SYSERR，不使服务假死。
+
+> 实施说明：
+>
+> - **编译模板（SPEC JUDGE-01）**：`LocalExecutor::compile` 以参数数组 `execve`
+>   启动，绝不经过 shell；C++17 `g++ -O2 -std=c++17 <src> -o <program> -lm`，C11
+>   `gcc -O2 -std=c11 <src> -o <program> -lm`，默认叠加
+>   `-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all`。
+>   用户源码与请求参数不能改变编译器路径、注入额外命令或绕过隔离。`JudgeOptions`
+>   的 `sanitizers_enabled`（默认 `true`）统一开关，仅测试可显式关闭。
+> - **Sanitizer 行为**：`-fno-sanitize-recover=all` 使 UBSan 报告未定义行为即中止，
+>   杜绝「已报 UB 但继续执行、输出匹配被误判 AC」；运行环境 `UBSAN_OPTIONS` 设
+>   `halt_on_error=1:print_stacktrace=1`，`ASAN_OPTIONS` 设 `detect_leaks=0`（与
+>   禁 ptrace/禁创建进程的 seccomp 兼容，泄漏检测关闭不影响越界等诊断）。
+> - **执行层结构化原因**：`ProcessResult.termination`（`TerminationReason`）为单一
+>   权威来源，另有仅在异常终止时依据诊断标注的 `sanitizer_error`。分类层
+>   `classify_case`（`src/judge/classification.{h,cpp}`）统一判定，优先级：
+>   取消/启动失败 `SYSERR` > 可靠 RSS 证据 `MLE` > 全局裁剪超时 `TLE(=全局上限)`
+>   > 单点超时 `TLE` > 信号/非零退出/非正常结束 `RE` > 输出超限 `RE` > `AC` > `WA`。
+>   **不能仅凭用户可自行打印的 stderr 文本识别 Sanitizer 错误**，实际退出状态才是
+>   判据；`MLE` 必须有 RSS 采样证据，SIGKILL/`bad_alloc`/分配失败无证据时按确定规则
+>   处理（`RE`），不伪造确定性。总体汇总沿用 `SYSERR > TLE > MLE > RE > WA > AC`，
+>   与遍历顺序无关。
+> - **编译故障区分**：编译器不存在/不在 PATH/沙箱初始化失败等基础设施故障返回
+>   `SYSERR`，不伪装为 `CE`；普通语法/类型/链接错误非零退出返回 `CE`。编译保护超时
+>   （未被全局裁剪）按 `CE`，被全局预算裁剪则按全局硬上限 `SYSERR`（沿用 M3.2）。
+> - **输出与诊断**：编译诊断、标准输出、标准错误分别有界采集（64KB/64KB/16KB），
+>   截断显式标识（`compile_output_truncated`/逐点 `output_truncated`），标准错误绝不
+>   混入用于答案比较的标准输出；编译诊断经 `scrub_compile_diagnostics` 清洗工作目录、
+>   `.oj_sandbox` 与 `/box/` 等内部路径，仅保留定位用户代码所需信息。
+> - **逐点与反馈**：编译成功后执行全部测试点，普通 WA/RE/TLE/MLE 不阻断后续点；全局
+>   硬上限或无法继续的系统故障时终止剩余点，保留已获得结果、未执行点不伪造。WA 点
+>   返回该点输入/期望输出/实际输出与结构化 `reason`/诊断，AC 点不含隐藏输入或答案。
+> - **指标口径**：逐点 `time_ms` 为子进程墙钟经过时间（不含排队/编译），逐点
+>   `memory_kb` 为 RSS 采样峰值（未采集为 `null`）；提交级 `runtime_ms` 为各点之和、
+>   `memory_kb` 为各点峰值最大值；`compile_time_ms` 独立返回。排队时间不计入用户程序
+>   运行时间。`runtime_ms`/`memory_kb` 随提交记录持久化，重启后可正确读取。
+> - **接入**：判题结果经既有 `SubmitService` 单事务写入 `submissions`（源码、状态、
+>   逐点 JSON、编译诊断、耗时/内存）与 `user_problem_status`；`POST .../submit` 响应
+>   新增 `compile_time_ms`、真实 `memory_kb`、`compile_output_truncated` 与逐点
+>   `reason`/`sanitizer_error`；前端 `judge.js` 分别展示运行耗时与编译耗时、峰值内存。
+> - **验证**：单元 `tests/unit/test_judge_classification.cpp`（22 项：分类优先级、
+>   多迹象、Sanitizer 文本不单独判失败、汇总顺序无关、诊断清洗）；集成
+>   `tests/integration/test_m34_classification.cpp`（真实 g++/gcc + 沙箱：默认
+>   ASan/UBSan 模板的 C++17/C11 AC/WA/CE、行尾空白、越界与 UB 判失败并留诊断、伪
+>   Sanitizer 文本不误判、TLE/RE/MLE、超大输出与诊断有界、编译器故障 `SYSERR` 后恢复、
+>   失败继续与混合优先级、指标口径）；`test_sandbox_integration.cpp` 的 UBSan 期望更新
+>   为「不可恢复判失败」；`test_submit_api.cpp` 更新为真实峰值内存、验证持久化。
+>   并发规模验证：`tests/integration/test_submit_scheduling_api.cpp` 的
+>   `test_five_users_sustained_concurrency` 以 5 名用户并发、连续 3 轮共 15 次真实
+>   ASan 判题（编译门限 2、worker=5）验证结果互不混用、计数一致、无遗留，实测最低可用
+>   内存约 737 MiB；超出产品目标（5 人同时）的更高并发尚未验证。全量 `ctest` **34/34** 通过
+>   （约 156s，单并发）。
+> - **边界**：不实现 M3.5 的完整持久化与停止清理验收、M3.6 Rejudge。编译耗时/排队
+>   时间为运行时/日志指标，未新增数据库列（数据模型仍为 SPEC 3.2 的 `runtime_ms`/
+>   `memory_kb`）。
 
 #### M3.5 持久化与停止清理
 

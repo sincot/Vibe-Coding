@@ -99,6 +99,7 @@ add_library(oj_core STATIC
   src/judge/executor.cpp
   src/judge/deadline.cpp
   src/judge/comparator.cpp
+  src/judge/classification.cpp
   src/judge/workspace.cpp
   src/judge/sandbox.cpp
   src/judge/compile_gate.cpp
@@ -362,6 +363,27 @@ add_executable(oj_judge_integration
 target_link_libraries(oj_judge_integration PRIVATE oj_core)
 
 add_test(NAME judge_integration COMMAND oj_judge_integration)
+
+# M3.4 分类与汇总逻辑单元测试（gtest，纯函数）：单点分类的确定性优先级、多迹象、
+# Sanitizer 文本不单独判失败、缺失指标、总体汇总严重度与顺序无关、诊断路径清洗。
+add_executable(oj_judge_classification_unit
+  tests/unit/test_judge_classification.cpp
+)
+
+target_link_libraries(oj_judge_classification_unit PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME judge_classification_unit COMMAND oj_judge_classification_unit)
+
+# M3.4 编译与结果分类集成测试（真实 g++/gcc + 沙箱）：默认 ASan/UBSan 编译模板的
+# AC/WA/CE、空白规则、越界/UB 判失败、伪 Sanitizer 文本不误判、TLE/RE/MLE、
+# 输出与诊断上限、编译器故障 SYSERR 后恢复、失败继续与混合优先级、指标口径。
+add_executable(oj_m34_classification_test
+  tests/integration/test_m34_classification.cpp
+)
+
+target_link_libraries(oj_m34_classification_test PRIVATE oj_core)
+
+add_test(NAME m34_classification COMMAND oj_m34_classification_test)
 
 # M1.6 提交校验与状态计算单元测试（gtest）：语言取值、源码校验、做题状态计算。
 add_executable(oj_submit_unit
