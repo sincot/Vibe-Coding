@@ -22,8 +22,9 @@
 - [x] M2.5 后台管理页面（原生前端后台：管理员入口与访问检查 + 题目管理（列表/创建/编辑/公开隐藏/删除）+ 测试用例管理（按 `ord` 增改删）+ 用户管理（列表/重置密码/改角色）；真正权限由后端接口执行）
 - [x] M3.1 判题任务调度（`JudgeManager` 有界等待队列 + `min(CPU 核数,8)` worker 线程池 + 每任务独立 future 结果通道 + 队列满载 503 立即拒绝 + 同步返回 + 停止排空回收；复用现有判题与持久化逻辑）
 - [x] M3.2 子进程与超时控制（fork/exec 与结果采集完善 + 单调时钟 watchdog + 单次判题全局 60s 硬上限 + 超时/取消 `SIGKILL` 进程组并由 `waitpid` 回收 + 服务停止取消与子进程清理）
+- [x] M3.3 运行隔离与资源限制（默认 tmpfs 工作目录 + `mkdtemp` 随机目录与安全清理 + user/mount/net/pid/ipc/uts 命名空间 + chroot 最小根目录 + 只读工作目录 + setrlimit CPU/文件/栈/fd/CORE + RSS 采样内存限制判 `MLE` + seccomp-bpf 禁网络/逃逸/进程创建/危险调用 + 64KB 输出上限 + 编译并发门限；真实 Linux 进程验证隔离、限制与 ASan/UBSan 兼容）
 
-后续阶段（Rejudge、完整沙箱/资源限制、CodeMirror、完整搜索筛选分页页面）尚未实现。
+后续阶段（Rejudge、ASan/UBSan 默认接入与完整分类、CodeMirror、完整搜索筛选分页页面）尚未实现。
 
 ## 环境要求
 
@@ -154,6 +155,19 @@ ctest --test-dir build -R judge_deadline_unit --output-on-failure
 输出匹配但异常退出判 `RE`。`submit_scheduling_api`（M3.2 扩展）覆盖停止服务时取消真实
 运行与排队任务、取消结果先落库且无遗留进程。
 
+运行隔离与资源限制测试（M3.3，单元 + 真实 Linux 进程集成）：
+
+```bash
+ctest --test-dir build -R sandbox_unit --output-on-failure
+ctest --test-dir build -R sandbox_integration --output-on-failure
+```
+
+`sandbox_unit` 覆盖编译并发门限（上限/超时/取消/释放）、资源上限换算、seccomp 过滤器
+构建、命名空间与 tmpfs 能力探测、`Workspace` 清理安全（不越界、不跟随符号链接）。
+`sandbox_integration` 以真实 g++/gcc 与命名空间/chroot/seccomp 验证：正常 C++17/C11、
+目录与网络与进程隔离、CPU/内存/输出上限、ASan/UBSan 兼容与越界诊断、环境不泄露、
+失败路径与遗留进程/目录清理。
+
 管理员题目接口测试（M2.1，单元 + 集成，隔离临时库 + 随机端口 + 可注入执行器）：
 
 ```bash
@@ -249,6 +263,9 @@ ctest --test-dir build -R static_files_unit --output-on-failure
 | `OJ_JWT_SECRET` | （无，必需） | JWT HS256 签名密钥，长度不少于 16 字节，无默认值 |
 | `OJ_JWT_EXPIRES_SECONDS` | `3600` | JWT 有效期（秒），须为 1..31536000 的整数 |
 | `OJ_JUDGE_QUEUE_CAPACITY` | `32` | 判题等待队列容量（等待执行的任务数，非正在执行数），须为 1..256 的整数（M3.1） |
+| `OJ_JUDGE_WORKSPACE` | `/opt/oj-tmpfs` | 判题工作目录根（应为 tmpfs，详见 `dependence.md` 3.9 节）（M3.3） |
+| `OJ_JUDGE_ALLOW_NON_TMPFS` | 未设置 | 取 `1/true/yes` 时允许工作目录非 tmpfs（仅开发/测试，会显著告警）（M3.3） |
+| `OJ_JUDGE_COMPILE_CONCURRENCY` | `2` | 编译阶段并发门限（1..64），运行阶段并发仍为 `min(CPU 核数, 8)`（M3.3） |
 
 非法输入（如 `--port abc`、`--port 0`、未知参数、`OJ_JUDGE_QUEUE_CAPACITY=0`）会打印
 错误信息并以非零返回码退出；端口被占用或地址不可用时同样报错并以非零返回码退出。
@@ -313,7 +330,8 @@ OJ_JWT_SECRET="$(openssl rand -hex 32)" OJ_ADMIN_PASSWORD='请改为强密码' \
 - **输出安全**：题面、样例、昵称、编译信息与程序输出一律通过 `textContent`/`<pre>` 作为纯文本渲染，HTML 特殊字符不会被解释执行。
 - **响应式**：题目页左右两栏，窗口宽度 ≤ 900px 时改为上下排列；长题面与长输出可滚动阅读。
 
-> 安全边界：本阶段仍使用 M1.5 的开发环境判题器，前端可提交不等于已具备公开运行不可信代码的能力；完整沙箱见 M3。
+> 安全边界：本阶段前端可提交并通过后端沙箱判题（M3.3），但 ASan/UBSan 默认接入与
+> 完整异常分类属 M3.4，尚不代表可安全公开运行任意不可信代码。
 
 #### M1.7 前端验证
 
@@ -1063,9 +1081,9 @@ curl -i -X POST http://127.0.0.1:8080/api/problems/1/submit \
   （worker 数 = `min(CPU 核数, 8)`），每个任务独立执行、结果独立交付；并发提交不再
   全局串行（详见「判题任务调度（M3.1）」）。
 
-> **安全边界（重要）**：M1.6 调用的仍是 M1.5 的开发环境判题器，**没有**完整沙箱
-> （无 setrlimit/seccomp/tmpfs），完成提交接口不代表已完成安全隔离，**不得公开接收
-> 不可信代码**。完整沙箱、线程池与 Rejudge 见 M3。
+> **安全边界（重要）**：自 M3.3 起判题在进程级沙箱中执行（tmpfs 随机目录 +
+> 命名空间/chroot + setrlimit/RSS 限制 + seccomp）。ASan/UBSan 的默认接入与完整异常
+> 分类属 M3.4，Rejudge 属 M3.6；受控样例通过不代表可安全公开运行任意不可信代码。
 
 ### 判题任务调度（M3.1）
 
@@ -1104,16 +1122,39 @@ curl -i -X POST http://127.0.0.1:8080/api/problems/1/submit \
   然后 `shutdown()` 回收 worker，最后才关闭数据库，保证取消结果先落库、无永久等待、无数据库
   关闭顺序错误。
 - **配置与限制**：`OJ_JUDGE_QUEUE_CAPACITY` 见「配置方式」。全局 60s 硬上限、强制终止与
-  服务停止取消见 M3.2；M3.3 沙箱/资源隔离、M3.4 完整分类/Sanitizer/内存采集、M3.6 Rejudge
-  尚未实现。
+  服务停止取消见 M3.2；运行隔离与资源限制（tmpfs/随机目录/chroot/setrlimit/seccomp/
+  输出上限/编译并发门限）见 M3.3 与下文「运行隔离与资源限制（M3.3）」。M3.4 完整分类/
+  Sanitizer 默认接入、M3.6 Rejudge 尚未实现。
 
-### 判题器（M1.5，仅开发环境验证）
+### 运行隔离与资源限制（M3.3）
+
+判题子进程在隔离环境中执行（`src/judge/sandbox.{h,cpp}` + `local_executor.cpp`）：
+
+- **工作目录**：默认 `/opt/oj-tmpfs`（`OJ_JUDGE_WORKSPACE` 覆盖），每次判题以 `mkdtemp`
+  原子创建随机目录（0700），用后仅删除本任务目录。启动时校验其为 tmpfs 并做一次真实
+  沙箱自检，失败即拒绝启动（不会降级为无保护执行）；无挂载权限的开发环境需显式设置
+  `OJ_JUDGE_ALLOW_NON_TMPFS=1`。挂载与容量见 `dependence.md` 3.9/8 节。
+- **命名空间与最小根目录**：`user/mount/net/pid/ipc/uts` 命名空间 + tmpfs 根 + 只读
+  bind `/usr`，用户程序无法读取沙箱外文件/受保护目录、无法越权写文件；工作目录在运行
+  阶段只读。`/proc` 由 PID 命名空间隔离为仅本任务进程。
+- **seccomp-bpf**：拒绝网络、挂载/逃逸、调试/内核接口、进程创建（运行阶段）、时间/
+  主机名修改及 x32 ABI 等；每个任务独立进程组，成功/失败/超时/取消后清理进程与目录。
+- **资源限制**：`RLIMIT_CPU/FSIZE/STACK/NOFILE/CORE`；内存**不使用 `RLIMIT_AS`**（与
+  ASan/UBSan 不兼容），改以 RSS 采样超限强杀并标记 `MLE`，峰值写入逐点结果。
+- **输出上限**：stdout 64 KiB、stderr 16 KiB、编译诊断 64 KiB，采集时截断且不挂死。
+- **编译并发门限**：`OJ_JUDGE_COMPILE_CONCURRENCY`（默认 2）单独约束高内存的编译阶段；
+  等待计入全局预算并可被取消。
+- **环境隔离**：子进程仅获受控最小环境，绝不继承 `OJ_JWT_SECRET`/`OJ_ADMIN_PASSWORD`。
+- **兼容性**：已验证 ASan/UBSan 程序在沙箱内正常启动运行，受控越界样例产生
+  AddressSanitizer 诊断（ASan/UBSan 的默认接入与完整分类属 M3.4）。
+
+### 判题器（`IExecutor` / `JudgeEngine`）
 
 判题核心位于 `src/judge/`，不依赖 HTTP 与数据库，可独立调用和测试：
 
 - `IExecutor`（`src/judge/executor.h`）：进程执行抽象，把「如何编译/运行子进程」与
-  「如何比对、汇总」解耦；`LocalExecutor`（`src/judge/local_executor.h`）为当前本机
-  实现，M3 将以 seccomp/setrlimit/tmpfs 沙箱实现替换。
+  「如何比对、汇总」解耦；`LocalExecutor`（`src/judge/local_executor.h`）为本机实现，
+  M3.3 起在进程级沙箱中执行。
 - `JudgeEngine`（`src/judge/judge.h`）：验证输入 → 创建独立临时工作目录 → 编译一次 →
   按顺序逐测试点运行 → 归一化比对 → 汇总，返回 `JudgeResult`（含逐点结果）。
 - `normalize_output` / `outputs_match`（`src/judge/comparator.h`）：输出归一化与比对，
@@ -1142,9 +1183,10 @@ result.status;                              // AC/WA/CE/TLE/RE/MLE/SYSERR
 - **语言与编译**：C++17 使用 `g++ -O2 -std=c++17 <src> -o program -lm`，C11 使用
   `gcc -O2 -std=c11 <src> -o program -lm`；可执行文件路径在父进程解析（含 `PATH`
   搜索）后由子进程以参数数组 `execv` 启动，不拼接 shell 命令，也不在 `fork` 后调用
-  非异步信号安全的复杂逻辑（M3.1 多线程 fork 安全）。**尚未接入 ASan/UBSan**，属 M3.4。
-- **工作目录**：每次判题经 `mkdtemp` 创建唯一目录（默认系统临时目录，可配置），保存
-  源码与编译产物，结束后只删除本次目录。M3 将改为 tmpfs 下的随机目录。
+  非异步信号安全的复杂逻辑（M3.1 多线程 fork 安全）。ASan/UBSan 的默认接入属 M3.4；
+  M3.3 已通过 `JudgeOptions::extra_compile_flags` 验证 `-fsanitize` 程序与沙箱兼容。
+- **工作目录**：每次判题在 `OJ_JUDGE_WORKSPACE`（默认 tmpfs `/opt/oj-tmpfs`）下经
+  `mkdtemp` 创建随机目录，保存源码与编译产物，结束后只删除本次目录（M3.3）。
 - **编译结果**：编译进程正常且退出码为 0 视为成功；非零退出码返回 `CE`，并附有长度
   上限的编译诊断；编译器不存在、无法创建目录等环境故障返回 `SYSERR`，不伪装为 `CE`；
   编译过程有保护超时。
@@ -1159,8 +1201,8 @@ result.status;                              // AC/WA/CE/TLE/RE/MLE/SYSERR
   未执行点不伪造。程序无任何输出时也能发现超时（`steady_clock` + 周期轮询）。
 - **进程组与 fd 卫生（M3.2）**：每个编译/运行进程在子进程中 `setpgid(0,0)` 建立独立进程组，
   超时/取消/后代占用管道时以 `kill(-pid, SIGKILL)` 清理编译器与用户程序的**后代进程**；
-  子进程 `exec` 前关闭继承的无关 fd（监听套接字、数据库连接、其它任务管道）。该机制是普通
-  进程组管理，不声称完整恶意进程隔离（M3.3 完善）。
+  子进程 `exec` 前关闭继承的无关 fd（监听套接字、数据库连接、其它任务管道）。M3.3 起运行
+  阶段由 seccomp 禁止创建进程，恶意进程逃逸与干扰进一步由 M3.3 沙箱约束。
 - **服务取消（M3.2）**：停止服务时 `JudgeManager` 取消全部已接收任务——正在运行的进程组被
   终止、等待队列中的任务不再启动新进程，取消结果按内部错误 `SYSERR` 持久化。
 - **比对**：去除每行行尾空白与文末空行后逐字符比较；保留行首空白、行内空白与中间
@@ -1173,9 +1215,10 @@ result.status;                              // AC/WA/CE/TLE/RE/MLE/SYSERR
 - **清理**：成功、`CE`、`RE`、`TLE`、全局上限、取消等所有路径都会关闭文件描述符、回收
   子进程（含后代进程组）并删除本次临时目录；不以系统范围的进程名匹配清理。
 
-> **安全边界**：本阶段只有基础超时与进程清理，**没有** setrlimit、seccomp、tmpfs 与
-> 内存限制，也**不是完整沙箱**，仅用于开发环境验证；不得用于公开接收不可信代码。
-> 完整 MLE 判定、Sanitizer 诊断与异常分类在 M3 完成。
+> **安全边界**：M3.3 已提供进程级隔离与资源限制（命名空间 + chroot + seccomp +
+> setrlimit/RSS 限制 + tmpfs 随机目录 + 输出上限），并以真实 Linux 进程受控样例验证。
+> 但 ASan/UBSan 的默认接入与完整异常分类属 M3.4，且受控样例通过不代表可安全公开运行
+> 任意不可信代码；仍需 M3.4/M3.5/M5 的完整回归与验收。
 
 ### 登录限速
 

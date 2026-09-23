@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -9,6 +10,8 @@
 
 namespace oj {
 namespace judge {
+
+class CompileGate;
 
 // 一个测试点：标准输入与期望输出均为文本。
 struct Testcase {
@@ -30,6 +33,20 @@ struct JudgeOptions {
   std::size_t stdout_limit_bytes = 64 * 1024;
   std::size_t stderr_limit_bytes = 16 * 1024;
   std::size_t compile_output_limit_bytes = 64 * 1024;
+  // 沙箱与资源限制（M3.3）：
+  //   - sandbox_enabled=false 仅用于本机开发/单元测试；正式服务始终保持 true，
+  //     沙箱不可用时拒绝执行，绝不降级为无保护运行；
+  //   - compile_memory_limit_kb 为编译器 RSS 预算（编译器会派生多个子进程）；
+  //   - default_memory_limit_kb 为题目未提供内存上限时的默认值。
+  bool sandbox_enabled = true;
+  long long compile_memory_limit_kb = 1024 * 1024;
+  long long default_memory_limit_kb = 65536;
+  // 全局编译并发门限（可选）。非空时，单次判题在编译前获取许可，等待计入本次
+  // 判题的全局硬上限并可被取消；编译结束立即释放。为空表示不限制（测试/单任务）。
+  std::shared_ptr<CompileGate> compile_gate;
+  // 额外的编译选项（追加在语言标准选项之后）。供 M3.4 接入 ASan/UBSan 或测试注入
+  // 使用；为空时保持当前编译选项不变。
+  std::vector<std::string> extra_compile_flags;
 };
 
 // 判题任务。判题核心不依赖 HTTP，也不负责任何提交记录入库。
@@ -38,6 +55,7 @@ struct JudgeTask {
   std::string source_code;
   std::vector<Testcase> testcases; // 按顺序执行
   int time_limit_ms = 2000;
+  long long memory_limit_kb = 65536; // 题目内存上限（RSS），超限判 MLE
 };
 
 // 单个测试点的结果。
@@ -45,6 +63,8 @@ struct TestcaseResult {
   int index = 0; // 执行顺序（0 起）
   JudgeStatus status = JudgeStatus::AC;
   long long time_ms = 0;
+  long long memory_kb = 0;       // 观测峰值 RSS（kB），0 表示未采集到
+  bool memory_exceeded = false;  // 因 RSS 超限被强制终止
   bool timed_out = false;
   bool output_truncated = false; // 标准输出超过上限
   bool global_deadline_hit = false; // 该点因全局硬上限（而非单点时限）被终止

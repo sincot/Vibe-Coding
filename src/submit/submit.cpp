@@ -30,7 +30,13 @@ nlohmann::json build_per_case(const judge::JudgeTask &task,
     entry["index"] = item.index;
     entry["status"] = judge::judge_status_name(item.status);
     entry["time_ms"] = item.time_ms;
-    entry["memory_kb"] = nullptr;
+    // 已通过 RSS 采样测得内存则给出数值；未采集到（如编译失败、进程未运行）
+    // 保持 null，明确区分“未采集”与 0。
+    if (item.memory_kb > 0) {
+      entry["memory_kb"] = item.memory_kb;
+    } else {
+      entry["memory_kb"] = nullptr;
+    }
     if (item.global_deadline_hit) {
       entry["global_deadline_hit"] = true;
     }
@@ -183,6 +189,7 @@ SubmitService::Outcome SubmitService::submit(std::int64_t user_id,
   task.language = language;
   task.source_code = source_code;
   task.time_limit_ms = problem.time_limit_ms;
+  task.memory_limit_kb = problem.memory_limit_kb;
   task.testcases.reserve(records.size());
   for (const TestcaseRecord &record : records) {
     judge::Testcase testcase;

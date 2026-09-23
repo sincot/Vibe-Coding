@@ -100,6 +100,8 @@ add_library(oj_core STATIC
   src/judge/deadline.cpp
   src/judge/comparator.cpp
   src/judge/workspace.cpp
+  src/judge/sandbox.cpp
+  src/judge/compile_gate.cpp
   src/judge/local_executor.cpp
   src/judge/judge.cpp
   src/judge/manager.cpp
@@ -329,6 +331,26 @@ add_executable(oj_judge_manager_unit
 target_link_libraries(oj_judge_manager_unit PRIVATE oj_core GTest::gtest_main)
 
 add_test(NAME judge_manager_unit COMMAND oj_judge_manager_unit)
+
+# M3.3 沙箱与资源限制单元测试（gtest）：编译并发门限、资源上限换算、seccomp 过滤器
+# 构建、能力探测与 Workspace 清理安全（不启动真实判题进程）。
+add_executable(oj_sandbox_unit
+  tests/unit/test_sandbox_unit.cpp
+)
+
+target_link_libraries(oj_sandbox_unit PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME sandbox_unit COMMAND oj_sandbox_unit)
+
+# M3.3 运行隔离与资源限制集成测试（真实 Linux 进程）：命名空间/chroot/seccomp/
+# setrlimit、目录与网络隔离、CPU/内存/输出限制、ASan/UBSan 兼容、失败路径与清理。
+add_executable(oj_sandbox_integration
+  tests/integration/test_sandbox_integration.cpp
+)
+
+target_link_libraries(oj_sandbox_integration PRIVATE oj_core)
+
+add_test(NAME sandbox_integration COMMAND oj_sandbox_integration)
 
 # M1.5 判题编译与进程集成测试（真实 g++/gcc + fork/exec，隔离临时工作目录）：
 # C++17/C11 的 AC/WA、CE、顺序执行、每点新进程、超时回收、超大输出、提前退出、

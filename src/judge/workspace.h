@@ -6,12 +6,12 @@
 namespace oj {
 namespace judge {
 
-// 一次判题的独立临时工作目录（SPEC JUDGE-04 的基础形态）。
+// 一次判题的独立临时工作目录（SPEC JUDGE-04）。
 //
-// 通过 mkdtemp 在指定基目录下原子创建唯一目录（权限 0700），用于保存源码与
-// 编译产物。析构时只删除本对象创建的目录，绝不影响其他文件。
-//
-// M1.5 默认基目录为系统临时目录，可配置；M3 将改为 tmpfs 下的随机目录。
+// 通过 mkdtemp 在指定基目录下原子创建唯一随机目录（权限 0700），用于保存源码与
+// 编译产物。析构时只删除本对象创建的目录：
+//   - 仅当路径仍位于创建时的基目录之下才执行删除，防止清理路径越界；
+//   - 若最终路径被替换为符号链接，只删除该符号链接本身，绝不跟随删除其指向内容。
 class Workspace {
 public:
   ~Workspace();
@@ -33,9 +33,12 @@ public:
                   std::string &error) const;
 
 private:
-  explicit Workspace(std::string path);
+  Workspace(std::string path, std::string base);
+
+  void cleanup() noexcept;
 
   std::string path_;
+  std::string base_;
 };
 
 } // namespace judge

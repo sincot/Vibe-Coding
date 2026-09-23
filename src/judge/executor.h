@@ -30,12 +30,20 @@ struct ProcessResult {
   bool launched = false;
   bool launch_error = false;
   std::string launch_error_message;
+  // 沙箱初始化（命名空间/挂载/资源限制/seccomp）失败。属于内部/策略故障，
+  // 绝不降级为无保护执行；由判题核心映射为 SYSERR 并保留诊断证据。
+  bool sandbox_error = false;
 
   bool timed_out = false; // 是否因超过时间限制被强制终止
   bool cancelled = false; // 是否因服务停止被主动取消（非用户程序超时）
   bool exited = false;    // 是否被 waitpid 正常回收并取得退出状态
   int exit_code = 0;      // exited==true 且非信号终止时的退出码
   int term_signal = 0;    // 被信号终止时的信号编号（0 表示非信号终止）
+
+  // 内存限制：按 RSS 采样并强制终止（不是仅采集数值）。memory_exceeded 为真时
+  // 进程因 RSS 超限被终止；memory_kb 为观测到的峰值 RSS（kB）。
+  bool memory_exceeded = false;
+  long long memory_kb = 0;
 
   bool stdout_truncated = false; // 标准输出超过上限，已截断
   bool stderr_truncated = false; // 标准错误超过上限，已截断
@@ -57,6 +65,10 @@ struct CompileRequest {
   std::vector<std::string> extra_flags; // 预留：M3.4 接入 ASan/UBSan 等选项
   int time_limit_ms = 10000;    // 编译保护超时（可能已被剩余全局预算裁剪）
   std::size_t output_limit_bytes = 64 * 1024; // 诊断信息采集上限
+  // 编译阶段是否启用沙箱（命名空间最小根 + setrlimit + seccomp 禁网络/危险调用）。
+  // 编译需要读取头文件与库、派生 cc1plus/as/ld，故采用比运行阶段宽松但仍受限的策略。
+  bool sandbox = true;
+  long long memory_limit_kb = 1024 * 1024; // 编译器 RSS 预算
   // 非空时，执行器在编译过程中轮询该令牌，服务停止时尽快终止编译器进程组。
   const CancellationToken *cancel = nullptr;
 };
@@ -68,6 +80,9 @@ struct RunRequest {
   int time_limit_ms = 2000;
   std::size_t stdout_limit_bytes = 64 * 1024;
   std::size_t stderr_limit_bytes = 16 * 1024;
+  // 运行阶段是否启用沙箱（最小根目录 + setrlimit + seccomp 禁网络/文件逃逸/进程创建）。
+  bool sandbox = true;
+  long long memory_limit_kb = 65536; // RSS 上限（kB），超限强制终止并标记 MLE
   // 非空时，执行器在运行过程中轮询该令牌，服务停止时尽快终止程序进程组。
   const CancellationToken *cancel = nullptr;
 };

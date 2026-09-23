@@ -100,6 +100,32 @@ bool parse_args(int argc, char **argv, Config &cfg, bool &want_help,
   return true;
 }
 
+bool read_judge_workspace(std::string &out, bool &allow_non_tmpfs,
+                          std::string &error) {
+  const char *workspace = std::getenv("OJ_JUDGE_WORKSPACE");
+  if (workspace != nullptr && *workspace != '\0') {
+    out = workspace;
+  } else {
+    out = kDefaultJudgeWorkspace;
+  }
+
+  allow_non_tmpfs = false;
+  const char *allow = std::getenv("OJ_JUDGE_ALLOW_NON_TMPFS");
+  if (allow != nullptr && *allow != '\0') {
+    const std::string value(allow);
+    if (value == "1" || value == "true" || value == "yes") {
+      allow_non_tmpfs = true;
+    } else if (value == "0" || value == "false" || value == "no") {
+      allow_non_tmpfs = false;
+    } else {
+      error = "OJ_JUDGE_ALLOW_NON_TMPFS 取值非法（应为 1/0）: \"" + value +
+              "\"";
+      return false;
+    }
+  }
+  return true;
+}
+
 bool read_judge_queue_capacity(int &out, std::string &error) {
   const char *value = std::getenv("OJ_JUDGE_QUEUE_CAPACITY");
   if (value == nullptr) {
@@ -127,6 +153,41 @@ bool read_judge_queue_capacity(int &out, std::string &error) {
   if (parsed < 1 || parsed > kMaxJudgeQueueCapacity) {
     error = "OJ_JUDGE_QUEUE_CAPACITY 须在 1.." +
             std::to_string(kMaxJudgeQueueCapacity) + " 之间，收到 \"" + text +
+            "\"";
+    return false;
+  }
+  out = static_cast<int>(parsed);
+  return true;
+}
+
+bool read_judge_compile_concurrency(int &out, std::string &error) {
+  const char *value = std::getenv("OJ_JUDGE_COMPILE_CONCURRENCY");
+  if (value == nullptr) {
+    out = kDefaultCompileConcurrency;
+    return true;
+  }
+  const std::string text(value);
+  if (text.empty()) {
+    error = "OJ_JUDGE_COMPILE_CONCURRENCY 不能为空";
+    return false;
+  }
+  for (char c : text) {
+    if (c < '0' || c > '9') {
+      error = "OJ_JUDGE_COMPILE_CONCURRENCY 必须是正整数，收到 \"" + text +
+              "\"";
+      return false;
+    }
+  }
+  long parsed = 0;
+  try {
+    parsed = std::stol(text);
+  } catch (...) {
+    error = "OJ_JUDGE_COMPILE_CONCURRENCY 数值非法: \"" + text + "\"";
+    return false;
+  }
+  if (parsed < 1 || parsed > kMaxCompileConcurrency) {
+    error = "OJ_JUDGE_COMPILE_CONCURRENCY 须在 1.." +
+            std::to_string(kMaxCompileConcurrency) + " 之间，收到 \"" + text +
             "\"";
     return false;
   }

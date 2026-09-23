@@ -1,6 +1,7 @@
 #include <chrono>
 #include <csignal>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -10,7 +11,10 @@
 #include "db/schema.h"
 #include "db/seed.h"
 #include "http/server.h"
+#include "judge/compile_gate.h"
+#include "judge/local_executor.h"
 #include "judge/manager.h"
+#include "judge/sandbox.h"
 #include "log.h"
 
 namespace {
@@ -41,7 +45,13 @@ void print_usage(std::ostream &os, const char *prog) {
       << "  OJ_JWT_EXPIRES_SECONDS  JWT 有效期（秒），默认 3600。\n"
       << "  OJ_JUDGE_QUEUE_CAPACITY  判题等待队列容量（等待执行的任务数），\n"
       << "                           默认 " << oj::config::kDefaultJudgeQueueCapacity
-      << "，取值 1.." << oj::config::kMaxJudgeQueueCapacity << "。\n";
+      << "，取值 1.." << oj::config::kMaxJudgeQueueCapacity << "。\n"
+      << "  OJ_JUDGE_WORKSPACE       判题 tmpfs 工作目录根，默认 "
+      << oj::config::kDefaultJudgeWorkspace << "。\n"
+      << "  OJ_JUDGE_ALLOW_NON_TMPFS 取 1 时允许工作目录非 tmpfs（仅开发/测试，不推荐）。\n"
+      << "  OJ_JUDGE_COMPILE_CONCURRENCY  编译阶段并发门限，默认 "
+      << oj::config::kDefaultCompileConcurrency << "，取值 1.."
+      << oj::config::kMaxCompileConcurrency << "。\n";
 }
 
 } // namespace
@@ -127,10 +137,76 @@ int main(int argc, char **argv) {
   }
   manager_options.queue_capacity = static_cast<std::size_t>(queue_capacity);
 
+  // 判题工作目录与沙箱：在初始化阶段检查依赖与权限，任何一项不可用即拒绝启动，
+  // 绝不在缺少隔离设施时降级为无沙箱运行。
+  oj::judge::JudgeOptions judge_options;
+  std::string workspace_error;
+  bool allow_non_tmpfs = false;
+  if (!oj::config::read_judge_workspace(judge_options.workspace_root,
+                                        allow_non_tmpfs, workspace_error)) {
+    oj::log(oj::LogLevel::Error, "判题工作目录配置错误: " + workspace_error);
+    return 1;
+  }
+
+  std::string sandbox_error;
+  if (!oj::judge::sandbox_supported(sandbox_error)) {
+    oj::log(oj::LogLevel::Error,
+            "判题沙箱不可用，拒绝启动（不会降级为无保护执行）: " +
+                sandbox_error);
+    return 1;
+  }
+
+  bool workspace_is_tmpfs = false;
+  if (!allow_non_tmpfs) {
+    std::string tmpfs_error;
+    if (!oj::judge::path_is_tmpfs(judge_options.workspace_root, tmpfs_error)) {
+      oj::log(oj::LogLevel::Error, "判题工作目录检查失败: " + tmpfs_error);
+      return 1;
+    }
+    workspace_is_tmpfs = true;
+  } else {
+    oj::log(oj::LogLevel::Warn,
+            "已允许非 tmpfs 工作目录（OJ_JUDGE_ALLOW_NON_TMPFS=1），"
+            "仅限开发/测试，正式部署请挂载 tmpfs");
+  }
+
+  std::string self_test_error;
+  if (!oj::judge::LocalExecutor::sandbox_self_test(judge_options.workspace_root,
+                                                   self_test_error)) {
+    oj::log(oj::LogLevel::Error, "判题沙箱自检失败，拒绝启动: " +
+                                     self_test_error);
+    return 1;
+  }
+  judge_options.sandbox_enabled = true;
+
+  // 编译阶段并发门限：单独约束高内存的编译阶段（同时最多 N 个编译），运行阶段仍
+  // 由 worker 数控制。等待编译许可的时间计入该任务的全局判题预算并可被取消。
+  int compile_concurrency = oj::config::kDefaultCompileConcurrency;
+  std::string compile_concurrency_error;
+  if (!oj::config::read_judge_compile_concurrency(compile_concurrency,
+                                                  compile_concurrency_error)) {
+    oj::log(oj::LogLevel::Error,
+            "编译并发配置错误: " + compile_concurrency_error);
+    return 1;
+  }
+  judge_options.compile_gate =
+      std::make_shared<oj::judge::CompileGate>(compile_concurrency);
+
+  const long long capacity_bytes =
+      oj::judge::mount_capacity_bytes(judge_options.workspace_root);
+  std::string workspace_desc = judge_options.workspace_root + "（" +
+                               (workspace_is_tmpfs ? "tmpfs" : "非 tmpfs");
+  if (capacity_bytes > 0) {
+    workspace_desc += "，容量上限 " +
+                      std::to_string(capacity_bytes / (1024 * 1024)) + " MiB";
+  }
+  workspace_desc += "）";
+  oj::log(oj::LogLevel::Info, "判题工作目录已就绪: " + workspace_desc);
+
   oj::HttpServer server(cfg.host, cfg.port, *db, std::move(jwt_config),
                         /*enable_test_routes=*/false,
                         /*judge_executor=*/nullptr,
-                        /*judge_options=*/{},
+                        /*judge_options=*/std::move(judge_options),
                         /*web_root=*/cfg.web_root,
                         /*manager_options=*/manager_options);
   if (!server.start(error)) {

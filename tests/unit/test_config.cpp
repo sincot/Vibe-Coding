@@ -403,6 +403,99 @@ TEST(ReadJudgeQueueCapacity, RejectsInvalidValues) {
 }
 
 // ---------------------------------------------------------------------------
+// read_judge_compile_concurrency（M3.3 编译阶段并发门限）
+// ---------------------------------------------------------------------------
+
+TEST(ReadJudgeCompileConcurrency, UnsetUsesDefault) {
+  EnvGuard guard("OJ_JUDGE_COMPILE_CONCURRENCY", nullptr);
+  int out = -1;
+  std::string error;
+  EXPECT_TRUE(oj::config::read_judge_compile_concurrency(out, error));
+  EXPECT_EQ(out, oj::config::kDefaultCompileConcurrency);
+  EXPECT_TRUE(error.empty());
+}
+
+TEST(ReadJudgeCompileConcurrency, AcceptsValidValues) {
+  for (const char *value : {"1", "2", "64"}) {
+    EnvGuard guard("OJ_JUDGE_COMPILE_CONCURRENCY", value);
+    int out = -1;
+    std::string error;
+    EXPECT_TRUE(oj::config::read_judge_compile_concurrency(out, error))
+        << "应接受: " << value;
+    EXPECT_EQ(out, std::stoi(value));
+  }
+}
+
+TEST(ReadJudgeCompileConcurrency, RejectsInvalidValues) {
+  for (const char *value : {"", "0", "-1", "65", "abc", "2.5", " 2"}) {
+    EnvGuard guard("OJ_JUDGE_COMPILE_CONCURRENCY", value);
+    int out = -1;
+    std::string error;
+    EXPECT_FALSE(oj::config::read_judge_compile_concurrency(out, error))
+        << "应拒绝: '" << value << "'";
+    EXPECT_FALSE(error.empty());
+  }
+}
+
+// ---------------------------------------------------------------------------
+// read_judge_workspace（M3.3 判题 tmpfs 工作目录）
+// ---------------------------------------------------------------------------
+
+TEST(ReadJudgeWorkspace, UnsetUsesDefaultTmpfs) {
+  EnvGuard workspace("OJ_JUDGE_WORKSPACE", nullptr);
+  EnvGuard allow("OJ_JUDGE_ALLOW_NON_TMPFS", nullptr);
+  std::string out;
+  bool allow_non_tmpfs = true;
+  std::string error;
+  EXPECT_TRUE(oj::config::read_judge_workspace(out, allow_non_tmpfs, error));
+  EXPECT_EQ(out, oj::config::kDefaultJudgeWorkspace);
+  EXPECT_FALSE(allow_non_tmpfs);
+  EXPECT_TRUE(error.empty());
+}
+
+TEST(ReadJudgeWorkspace, AcceptsOverrideAndNonTmpfsFlag) {
+  EnvGuard workspace("OJ_JUDGE_WORKSPACE", "/tmp/oj-ws");
+  EnvGuard allow("OJ_JUDGE_ALLOW_NON_TMPFS", "1");
+  std::string out;
+  bool allow_non_tmpfs = false;
+  std::string error;
+  EXPECT_TRUE(oj::config::read_judge_workspace(out, allow_non_tmpfs, error));
+  EXPECT_EQ(out, "/tmp/oj-ws");
+  EXPECT_TRUE(allow_non_tmpfs);
+}
+
+TEST(ReadJudgeWorkspace, RejectsInvalidNonTmpfsFlag) {
+  EnvGuard workspace("OJ_JUDGE_WORKSPACE", nullptr);
+  EnvGuard allow("OJ_JUDGE_ALLOW_NON_TMPFS", "maybe");
+  std::string out;
+  bool allow_non_tmpfs = false;
+  std::string error;
+  EXPECT_FALSE(oj::config::read_judge_workspace(out, allow_non_tmpfs, error));
+  EXPECT_FALSE(error.empty());
+}
+
+TEST(ReadJudgeWorkspace, AcceptsBooleanVariants) {
+  const struct {
+    const char *value;
+    bool expected;
+  } cases[] = {
+      {"1", true},   {"true", true}, {"yes", true},
+      {"0", false},  {"false", false}, {"no", false},
+  };
+  for (const auto &item : cases) {
+    EnvGuard workspace("OJ_JUDGE_WORKSPACE", "/tmp/oj-ws");
+    EnvGuard allow("OJ_JUDGE_ALLOW_NON_TMPFS", item.value);
+    std::string out;
+    bool allow_non_tmpfs = !item.expected;
+    std::string error;
+    EXPECT_TRUE(oj::config::read_judge_workspace(out, allow_non_tmpfs, error))
+        << "值: " << item.value;
+    EXPECT_EQ(allow_non_tmpfs, item.expected) << "值: " << item.value;
+    EXPECT_TRUE(error.empty());
+  }
+}
+
+// ---------------------------------------------------------------------------
 // load_jwt_config
 // ---------------------------------------------------------------------------
 

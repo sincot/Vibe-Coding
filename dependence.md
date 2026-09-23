@@ -113,19 +113,26 @@ sudo systemctl enable --now cron
 
 ```bash
 sudo mkdir -p /opt/oj-tmpfs
-sudo mount -t tmpfs -o size=2G,mode=1777 tmpfs /opt/oj-tmpfs
+sudo mount -t tmpfs -o size=512M,mode=1777 tmpfs /opt/oj-tmpfs
 ```
 
 - 说明：
   - **不能加 `noexec`**：判题需在此目录执行编译产物。
-  - `size=2G` 为容量上限，可按机器内存调整；`mode=1777` 允许判题子进程写入。
+  - `size=512M` 为容量上限（tmpfs 按实际写入计费，非预分配）。此上限依据 3.3 GiB
+    服务器内存预算确定：每个判题任务的工作目录仅需保存源码（≤64 KiB）与编译产物
+    （含 ASan 时数 MB），运行阶段工作目录被重新挂载为只读，用户程序无法写入，
+    故 512 MiB 足以覆盖并发产物且不会挤占系统所需内存。内存充裕的机器可上调至 1G。
+  - `mode=1777` 允许判题子进程写入；工作目录本身由服务以 `mkdtemp` 原子创建为 0700。
   - 该挂载点在 `/opt` 下、仓库目录之外，重启后需重新挂载。
 
 - 开机自动挂载：在 `/etc/fstab` 追加一行
 
   ```
-  tmpfs /opt/oj-tmpfs tmpfs defaults,size=2G,mode=1777 0 0
+  tmpfs /opt/oj-tmpfs tmpfs defaults,size=512M,mode=1777 0 0
   ```
+
+- 不带 sudo 权限时，仅可用于开发/测试：显式设置 `OJ_JUDGE_WORKSPACE=<可写目录>`
+  与 `OJ_JUDGE_ALLOW_NON_TMPFS=1`。此时服务会显著告警，正式部署必须挂载 tmpfs。
 
 ---
 
@@ -213,3 +220,90 @@ M1.5 判题器**不新增系统依赖**：
   挂载的 tmpfs 目录 `/opt/oj-tmpfs`。
 - 本阶段只有基础超时与子进程回收，**不是完整沙箱**，不得用于公开接收不可信代码；
   完整资源限制与系统调用限制在 M3 完成。
+
+---
+
+## 8. 判题沙箱与资源限制运行说明（M3.3 起）
+
+### 8.1 新增依赖
+
+M3.3 **不新增系统包**。seccomp 过滤器以手写经典 BPF（`linux/seccomp.h` +
+`linux/filter.h`）在父进程预构建、子进程仅 `prctl(PR_SET_SECCOMP)` 加载，未使用
+`libseccomp`（因此 2.1 节的 `libseccomp-dev` 目前非必需，保留以兼容后续可选替换）。
+
+### 8.2 隔离机制
+
+每次编译/运行在隔离的子进程中执行（`src/judge/local_executor.cpp` +
+`src/judge/sandbox.cpp`）：
+
+- **命名空间**：`user` / `mount` / `net` / `pid` / `ipc` / `uts`。写 uid/gid 映射后
+  子进程在新用户命名空间内成为 `root`，在宿主上仍映射为运行服务的普通用户，绝不
+  以 root 运行服务。
+- **最小根目录 + chroot**：以 tmpfs 为根，只读 bind `/usr` 并重建 `/lib`、`/lib64`、
+  `/bin`、`/sbin` 符号链接，挂载新 `/proc` 与最小 `/dev`。编译阶段把工作目录可写
+  bind 到 `/box`；运行阶段把待执行程序复制进沙箱自有的只读 `/box` tmpfs，不暴露宿主
+  工作目录（也避免了对父命名空间 tmpfs 的只读重挂载，该操作在 `/dev/shm` 等挂载上会
+  返回 EPERM）。
+- **seccomp-bpf**：拒绝网络（socket 家族、io_uring）、挂载/逃逸（mount/umount/
+  pivot_root/setns/open_tree/open_by_handle_at 等）、调试与内核接口（ptrace/bpf/
+  perf_event_open/keyctl/模块与 kexec 等）、时间/主机名修改；运行阶段额外拒绝
+  `fork/vfork/clone/clone3`。x32 ABI 系统调用号一律拒绝。文件访问通过 chroot +
+  只读挂载约束在沙箱内，而非仅拦截 `open` 名称（动态加载器与 ASan 需要读库与
+  `/proc/self`）。
+- **进程边界**：每个任务独立进程组；运行阶段用户程序为 PID ≠ 1 的载荷进程，
+  另有一个 PID 1 init 回收孤儿进程（避免 PID 1 忽略默认信号导致信号崩溃被吞）。
+- **文件描述符/环境**：`close_range` 关闭除状态/输出管道外的全部继承 fd；子进程只
+  获得受控最小环境（`PATH`/`HOME=/nonexistent`/`TMPDIR=/tmp`/`LANG`/`LC_ALL`），
+  绝不传递 `OJ_JWT_SECRET`、`OJ_ADMIN_PASSWORD` 等服务密钥。
+
+### 8.3 资源限制
+
+- **CPU**：`setrlimit(RLIMIT_CPU)`，取单点时限向上取整 + 1s（编译阶段更宽松），与
+  墙钟 watchdog 双保险。
+- **内存**：**不设置 `RLIMIT_AS`**（ASan/UBSan 会预留海量虚拟地址空间，设置后
+  启动即失败）。改以 20ms 周期采样用户进程 RSS，超限即 `SIGKILL` 整个进程组并标记
+  `memory_exceeded` → 判题核心据此判 `MLE`；观测峰值写入逐点结果供 M3.4 分类。
+  编译阶段按进程组汇总 RSS（覆盖 `cc1plus`/`as`/`ld`）。
+- **文件/栈/描述符**：`RLIMIT_FSIZE`、`RLIMIT_STACK`、`RLIMIT_NOFILE`、`RLIMIT_CORE=0`。
+- **输出**：标准输出 64 KiB、标准错误 16 KiB、编译诊断 64 KiB，采集时按字节上限
+  截断并继续排空管道（不先无限读取），截断不判为 AC，采集不挂死。
+- **编译并发门限**：`OJ_JUDGE_COMPILE_CONCURRENCY`（默认 2）限制同时编译数，运行
+  阶段仍由 worker 数（`min(CPU 核数, 8)`）控制。等待许可的时间计入该次判题的全局
+  60s 硬上限，并可被服务停止取消。
+
+### 8.4 环境变量
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `OJ_JUDGE_WORKSPACE` | `/opt/oj-tmpfs` | 判题工作目录（应为 tmpfs） |
+| `OJ_JUDGE_ALLOW_NON_TMPFS` | 未设置 | `1/true/yes` 允许非 tmpfs（仅开发/测试） |
+| `OJ_JUDGE_COMPILE_CONCURRENCY` | `2` | 编译阶段并发门限（1..64） |
+| `OJ_JUDGE_QUEUE_CAPACITY` | `32` | 判题等待队列容量（1..256） |
+
+### 8.5 失败行为与启动检查
+
+- 启动时依次检查：`sandbox_supported`（内核允许非特权用户命名空间）、工作目录是否
+  为 tmpfs（未显式允许时）、以及一次真实沙箱自检（`/bin/true`）。任一失败即报错
+  退出，**绝不降级为无保护执行**。
+- 运行期沙箱初始化（命名空间/挂载/chroot/setrlimit/seccomp）失败时，执行器返回
+  `launch_error + sandbox_error`，判题核心判为 `SYSERR` 并保留明确诊断；不静默降级。
+- tmpfs 不可用、容量不足或写入失败：工作目录创建/写入失败 → `SYSERR`；判题请求
+  不会永久等待（全局硬上限 + watchdog）。
+- 成功、崩溃、超时、内存超限、策略拒绝、服务停止后均清理本次任务的进程组与工作
+  目录（`Workspace` RAII，且校验路径未越界、不跟随符号链接）；不删除其他任务目录，
+  不卸载共享 tmpfs。
+
+### 8.6 3.3 GiB 服务器资源预算（本次实测环境）
+
+| 项目 | 预算 |
+|---|---|
+| 系统 + sshd + 服务/数据库 | 约 0.5–0.7 GiB |
+| 运行阶段并发（worker=min(CPU,8)；本机 4）ASan 程序 RSS | 约 0.1–0.4 GiB |
+| 编译阶段并发（门限 2）实际 RSS | 约 0.4–0.8 GiB |
+| `/opt/oj-tmpfs` 容量上限 | 512 MiB（实际并发产物仅数十 MB） |
+| 沙箱内根 tmpfs（每进程稀疏，按写入计费） | 编译 256 MiB / 运行 64 MiB 上限 |
+
+> 本机（4 vCPU / 3.3 GiB，无 swap）实测：全量串行 `ctest` 期间系统已用峰值约
+> 2.1 GiB（含开发工具约占 0.9 GiB），剩余可用最低约 1.0 GiB；4 路并发真实判题
+> （编译门限 2）在 1 秒内全部 AC，无异常。
+

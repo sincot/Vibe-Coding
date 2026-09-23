@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "judge/comparator.h"
+#include "judge/compile_gate.h"
 #include "judge/workspace.h"
 
 namespace oj {
@@ -109,8 +110,19 @@ JudgeResult JudgeEngine::judge(const JudgeTask &task,
     return result;
   }
 
-  // 3. 编译一次。编译预算取「编译保护超时」与剩余全局预算的较小者；若是被全局
-  //    预算裁剪导致超时，按全局硬上限处理（SYSERR）而非普通编译错误（CE）。
+  // 3. 编译一次。先获取全局编译并发门限（若配置）：等待时间计入本次判题的全局
+  //    硬上限，并周期性响应取消；既不无限等待，也不在未取得许可时启动编译。
+  CompileGateGuard gate_guard(options_.compile_gate.get(), global_deadline,
+                              cancel);
+  if (!gate_guard.acquired()) {
+    if (cancel != nullptr && cancel->cancelled()) {
+      mark_cancelled();
+    } else {
+      mark_global_exhausted();
+    }
+    return result;
+  }
+
   const int remaining_before_compile = global_deadline.remaining_ms();
   if (remaining_before_compile <= 0) {
     mark_global_exhausted();
@@ -134,8 +146,13 @@ JudgeResult JudgeEngine::judge(const JudgeTask &task,
   compile_request.time_limit_ms = compile_limit_ms;
   compile_request.output_limit_bytes = options_.compile_output_limit_bytes;
   compile_request.cancel = cancel;
+  compile_request.sandbox = options_.sandbox_enabled;
+  compile_request.memory_limit_kb = options_.compile_memory_limit_kb;
+  compile_request.extra_flags = options_.extra_compile_flags;
 
   ProcessResult compile_result = executor_.compile(compile_request);
+  // 编译结束立即释放编译许可，运行阶段不占用高内存阶段的并发名额。
+  gate_guard.release_now();
   result.compile_output = compile_result.stdout_data;
   if (!compile_result.stderr_data.empty()) {
     if (!result.compile_output.empty()) {
@@ -149,9 +166,12 @@ JudgeResult JudgeEngine::judge(const JudgeTask &task,
     return result;
   }
   if (compile_result.launch_error) {
-    // 编译器不存在等属于执行环境故障，绝不伪装成 CE。
+    // 编译器不存在、沙箱初始化失败等属于执行环境/策略故障，绝不伪装成 CE，
+    // 也绝不降级为无沙箱编译。
     result.status = JudgeStatus::SYSERR;
-    result.message = "编译环境故障: " + compile_result.launch_error_message;
+    result.message = (compile_result.sandbox_error ? "编译沙箱不可用: "
+                                                   : "编译环境故障: ") +
+                     compile_result.launch_error_message;
     return result;
   }
   if (compile_result.timed_out) {
@@ -216,12 +236,18 @@ JudgeResult JudgeEngine::judge(const JudgeTask &task,
     run_request.stdout_limit_bytes = options_.stdout_limit_bytes;
     run_request.stderr_limit_bytes = options_.stderr_limit_bytes;
     run_request.cancel = cancel;
+    run_request.sandbox = options_.sandbox_enabled;
+    run_request.memory_limit_kb = task.memory_limit_kb > 0
+                                      ? task.memory_limit_kb
+                                      : options_.default_memory_limit_kb;
 
     ProcessResult run_result = executor_.run(run_request, testcase.input);
 
     TestcaseResult case_result;
     case_result.index = static_cast<int>(i);
     case_result.time_ms = run_result.time_ms;
+    case_result.memory_kb = run_result.memory_kb;
+    case_result.memory_exceeded = run_result.memory_exceeded;
     case_result.timed_out = run_result.timed_out;
     case_result.output_truncated = run_result.stdout_truncated;
     case_result.exit_code = run_result.exit_code;
@@ -237,9 +263,11 @@ JudgeResult JudgeEngine::judge(const JudgeTask &task,
     } else if (run_result.launch_error) {
       case_result.status = JudgeStatus::SYSERR;
       case_result.message =
-          "无法启动运行进程: " + run_result.launch_error_message;
+          (run_result.sandbox_error ? std::string("运行沙箱不可用: ")
+                                    : std::string("无法启动运行进程: ")) +
+          run_result.launch_error_message;
       result.cases.push_back(std::move(case_result));
-      break; // 系统故障：无法继续可靠判题，提前终止
+      break; // 系统/策略故障：无法继续可靠判题，提前终止
     } else if (run_result.timed_out && global_capped) {
       // 该点并未超过题目时限，而是可用全局预算不足以完成，属全局硬上限终止。
       case_result.status = JudgeStatus::TLE;
@@ -254,6 +282,14 @@ JudgeResult JudgeEngine::judge(const JudgeTask &task,
       case_result.status = JudgeStatus::TLE;
       case_result.message =
           "超出时间限制（" + std::to_string(problem_limit_ms) + " ms）";
+    } else if (run_result.memory_exceeded) {
+      // 明确由 RSS 采样判定超内存：与所有 SIGKILL 区分，保留证据供 M3.4 分类。
+      case_result.status = JudgeStatus::MLE;
+      case_result.message =
+          "超出内存限制（RSS > " +
+          std::to_string(task.memory_limit_kb > 0 ? task.memory_limit_kb
+                                                  : options_.default_memory_limit_kb) +
+          " kB，峰值 " + std::to_string(run_result.memory_kb) + " kB）";
     } else if (run_result.term_signal != 0) {
       case_result.status = JudgeStatus::RE;
       case_result.message = "运行时被信号 " +

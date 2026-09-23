@@ -978,15 +978,73 @@ Vibe-Coding/
 
 #### M3.3 运行隔离与资源限制
 
-- [ ] 配置 tmpfs 判题目录。
-- [ ] 为每次提交创建独立随机运行目录。
-- [ ] 实现目录访问隔离与执行后清理。
-- [ ] 配置 `setrlimit` 资源限制，落实 CPU 与内存限制。
-- [ ] 配置 seccomp-bpf，限制网络、文件读写、`/proc` 访问及其他危险系统调用。
-- [ ] 实现输出采集上限 64KB。
-- [ ] 验证沙箱策略与编译、程序启动及 Sanitizer 运行兼容。
+- [x] 配置 tmpfs 判题目录。
+- [x] 为每次提交创建独立随机运行目录。
+- [x] 实现目录访问隔离与执行后清理。
+- [x] 配置 `setrlimit` 资源限制，落实 CPU 与内存限制。
+- [x] 配置 seccomp-bpf，限制网络、文件读写、`/proc` 访问及其他危险系统调用。
+- [x] 实现输出采集上限 64KB。
+- [x] 验证沙箱策略与编译、程序启动及 Sanitizer 运行兼容。
 
 > 本小节可按运行目录隔离、资源限制、系统调用限制分批实现。
+
+> 实施说明：
+>
+> - **工作目录（tmpfs）**：默认沿用 `/opt/oj-tmpfs`（`OJ_JUDGE_WORKSPACE` 可覆盖），
+>   容量上限按 3.3 GiB 机器预算定为 **512 MiB**（`dependence.md` 3.9/8.6 节，含
+>   fstab 与验证命令）。启动时检查该目录确为 tmpfs（`path_is_tmpfs`），并执行一次
+>   真实沙箱自检（`LocalExecutor::sandbox_self_test`，以 `/bin/true` 验证命名空间/
+>   最小根目录/setrlimit/seccomp），任一失败即报错退出，绝不降级为无保护执行。
+>   无挂载权限的开发/测试环境可显式 `OJ_JUDGE_ALLOW_NON_TMPFS=1` 并显著告警；正式
+>   部署必须挂载 tmpfs。本次本机无 sudo，未在 `/opt/oj-tmpfs` 实际挂载；已改用
+>   `/dev/shm`（真实 tmpfs）端到端验证工作目录检查、启动与沙箱判题（见 8.5/8.6 节），
+>   `/opt/oj-tmpfs` 的挂载仍属部署步骤。
+> - **随机目录与清理**：每次判题以 `mkdtemp` 在基目录下原子创建 `oj_judge_XXXXXX`
+>   （0700，随机后缀避免碰撞）；`Workspace` 析构仅删除本任务目录，并校验路径仍在
+>   创建时基目录之下、若被替换为符号链接则只删除链接本身（不跟随、不越界）。
+> - **目录访问隔离**：沙箱在 user/mount/pid/net/ipc/uts 命名空间内以 tmpfs 为根，
+>   只读 bind `/usr` 并重建 `/lib`、`/lib64`、`/bin`、`/sbin` 符号链接，挂新 `/proc`
+>   与最小 `/dev`；编译阶段将工作目录可写 bind 到 `/box`，运行阶段则把待执行程序复制
+>   进沙箱自有的只读 `/box` tmpfs（不暴露宿主工作目录，也不依赖对父命名空间 tmpfs 的
+>   只读重挂载——该操作在 `/dev/shm` 等挂载上会返回 EPERM）。用户程序无法读取沙箱外
+>   文件/受保护目录，无法越权写入（`/box` 只读），可读自身可执行文件。实测样例确认：
+>   读取宿主哨兵文件、`/etc/passwd`、对宿主路径与 `/box` 的写入均失败，宿主文件未被改写。
+> - **setrlimit 与内存**：`RLIMIT_CPU`（单点时限向上取整 + 1s，编译更宽松）、
+>   `RLIMIT_FSIZE`、`RLIMIT_STACK`、`RLIMIT_NOFILE`、`RLIMIT_CORE=0`；**内存不使用
+>   `RLIMIT_AS`**（与 ASan/UBSan 的巨量虚拟地址预留冲突），改以 20ms 周期采样用户
+>   进程 RSS，超限即 `SIGKILL` 进程组并标记 `memory_exceeded`→`MLE`，峰值写入逐点
+>   结果。实测：测试限 32 MiB、受控分配 80 MiB 的样例判 `MLE` 且后续判题正常。
+> - **seccomp-bpf**：手写经典 BPF，在父进程预构建、子进程 `prctl` 加载（避免多线程
+>   fork 后分配）。拒绝网络（socket 家族、io_uring）、挂载/逃逸（mount/umount/
+>   pivot_root/setns/open_tree/open_by_handle_at 等）、调试与内核接口（ptrace/bpf/
+>   perf_event_open/keyctl/模块与 kexec 等）、时间/主机名修改及 x32 ABI；运行阶段
+>   额外拒绝 `fork/vfork/clone/clone3`。文件访问以命名空间/chroot/只读挂载约束，而非
+>   仅拦截 `open` 名称（动态加载器与 ASan 需读库与 `/proc/self`）；`/proc` 由 PID
+>   命名空间隔离为仅本任务进程。实测：socket/socketpair/fork 均被拒，宿主 `/proc`
+>   不可见。
+> - **进程与 fd 卫生**：每任务独立进程组；运行阶段用户程序为 PID≠1 的载荷进程，另设
+>   PID 1 init 回收孤儿（避免 PID 1 忽略默认信号把信号崩溃误判为 AC）。`close_range`
+>   关闭无关继承 fd；子进程仅获受控最小环境，绝不传递 `OJ_JWT_SECRET`/
+>   `OJ_ADMIN_PASSWORD`（实测未继承）。
+> - **输出上限**：stdout 64 KiB、stderr 16 KiB、编译诊断 64 KiB，采集时按字节截断并
+>   继续排空管道（不先无限读取）；实测 65535/65536 字节判 AC、65537 字节判非 AC 且
+>   标记截断，1 MB stderr 有界采集且不挂死。
+> - **编译并发门限**：`OJ_JUDGE_COMPILE_CONCURRENCY`（默认 2）单独约束高内存的编译
+>   阶段（运行阶段仍为 worker=min(CPU,8)）；等待许可计入该次判题全局 60s 硬上限并可
+>   被取消（`CompileGate` + `CompileGateGuard`，单元测试覆盖超时/取消/释放）。
+> - **错误不降级**：沙箱初始化失败返回 `launch_error+sandbox_error`→`SYSERR`；工作
+>   目录不可创建/写入失败→`SYSERR`；均保留明确诊断，不静默无保护执行、不永久等待。
+> - **验证**：单元 `tests/unit/test_sandbox_unit.cpp`（18 项：编译门限、资源上限换算、
+>   seccomp 过滤器、能力探测、Workspace 清理安全）；集成
+>   `tests/integration/test_sandbox_integration.cpp`（真实 Linux 进程：正常 C++17/C11、
+>   目录/网络/进程隔离、CPU/内存/输出限制、ASan/UBSan 兼容与越界诊断、环境不泄露、
+>   失败路径与清理）；`test_config.cpp` 覆盖新环境变量。受影响回归 `judge_integration`、
+>   `sandbox_unit`、`sandbox_integration`、`submit_api`、`submit_scheduling_api` 通过，
+>   全量 `ctest` **32/32** 通过；4 路并发真实判题（编译门限 2）在 1 秒内全部 AC。
+> - **边界**：ASan/UBSan 的默认接入与完整异常分类、内存/耗时汇总属 M3.4（本次仅以
+>   `JudgeOptions::extra_compile_flags` 注入 `-fsanitize` 验证兼容性，未勾选 M3.4）；
+>   真实 tmpfs 挂载需 root 权限，未在本机执行；受控样例通过不代表可安全公开运行任意
+>   不可信代码，仍需 M3.4/M3.5/M5 的完整回归与验收。
 
 #### M3.4 编译与结果分类
 
