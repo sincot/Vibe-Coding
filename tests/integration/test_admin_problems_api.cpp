@@ -1003,9 +1003,11 @@ void test_update_explicit_clear() {
         "详情公开样例为空数组");
 }
 
-// 门控执行器：确定性制造「提交正在判题时题目被删除」的交错，验证提交事务内复核。
+// 门控执行器：确定性制造「提交正在判题时尝试删除题目」的交错。
+// M3.7 起，题目存在未结算在途任务（判题进行中）时删除被拒（409），已接收任务正常
+// 完成并保存终态（避免因删题丢失已接收任务）。
 void test_delete_during_judge_gated() {
-  std::cout << "判题期间删除题目：提交返回 404 且不产生记录\n";
+  std::cout << "判题期间删除题目：在途任务存在时删除被拒（409），提交正常完成\n";
   GatedExecutor executor;
   Env env("adm_gated", "", &executor);
   check(env.ok(), "服务启动成功");
@@ -1046,15 +1048,15 @@ void test_delete_during_judge_gated() {
   }
 
   auto del = admin_delete(cli, admin, id);
-  check(del && del->status == 200, "判题期间删除题目成功");
-  check(!problem_exists(env.db(), id), "题目已从数据库删除");
+  check(del && del->status == 409, "判题期间删除题目被拒（存在未结算在途任务）");
+  check(problem_exists(env.db(), id), "题目未被删除");
 
   executor.release();
   submitter.join();
 
-  check(submit_status == 404, "题目被删后提交返回 404（非 500/假成功）");
-  check(count_for(env.db(), "submissions", id) == 0, "未产生提交记录");
-  check(count_for(env.db(), "testcases", id) == 0, "用例已随题目删除");
+  check(submit_status == 200, "题目仍在，提交正常完成并返回 200");
+  check(count_for(env.db(), "submissions", id) == 1, "提交持久化 1 条");
+  check(count_for(env.db(), "testcases", id) >= 1, "用例保留");
 }
 
 // 并发删除与提交：最终状态必须自洽——题目存在则有提交且删除被拒，题目删除则提交

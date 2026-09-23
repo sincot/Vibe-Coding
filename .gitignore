@@ -19,6 +19,8 @@ ojd
 data/oj.db
 data/oj.db-wal
 data/oj.db-shm
+# 单实例互斥锁文件（M3.7，随数据库生成）
+data/*.lock
 *.db
 *.db-wal
 *.db-shm

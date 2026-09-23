@@ -231,10 +231,42 @@ ProblemAdminStore::DeleteStatus ProblemAdminStore::remove(std::int64_t id,
     return DeleteStatus::HasSubmissions;
   }
 
-  // 无提交：删除该题全部用例（公开样例与隐藏用例）、做题状态记录与题目本身。
+  // M3.7：题目仍有未结算的在途任务（已接收、尚未生成提交记录）时同样拒绝删除，
+  // 避免已接收任务因题目被删除而无法保存终态，也避免外键失败/悬挂在途记录。
+  // 与提交保存复用同一事务互斥锁，检查与删除不会被并发接收绕过。
+  sqlite3_int64 in_flight_count = 0;
+  {
+    Statement stmt;
+    if (!db_.prepare(
+            "SELECT COUNT(*) FROM in_flight_tasks WHERE problem_id = ? AND "
+            "state != 'interrupted'",
+            stmt, error)) {
+      rollback_quiet(db_);
+      return DeleteStatus::Error;
+    }
+    if (!stmt.bind(1, static_cast<sqlite3_int64>(id))) {
+      error = stmt.errmsg();
+      rollback_quiet(db_);
+      return DeleteStatus::Error;
+    }
+    if (stmt.step() != SQLITE_ROW) {
+      error = stmt.errmsg();
+      rollback_quiet(db_);
+      return DeleteStatus::Error;
+    }
+    in_flight_count = stmt.column_int64(0);
+  }
+  if (in_flight_count > 0) {
+    rollback_quiet(db_);
+    return DeleteStatus::HasSubmissions;
+  }
+
+  // 无提交且无未结算在途任务：删除该题全部用例（公开样例与隐藏用例）、做题状态
+  // 记录、残留的中断在途记录与题目本身。
   const char *statements[] = {
       "DELETE FROM testcases WHERE problem_id = ?",
       "DELETE FROM user_problem_status WHERE problem_id = ?",
+      "DELETE FROM in_flight_tasks WHERE problem_id = ?",
       "DELETE FROM problems WHERE id = ?",
   };
   for (const char *sql : statements) {

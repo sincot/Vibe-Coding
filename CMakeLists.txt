@@ -80,6 +80,8 @@ add_library(oj_core STATIC
   src/db/problem_admin.cpp
   src/db/testcase_admin.cpp
   src/db/submissions.cpp
+  src/db/in_flight.cpp
+  src/db/instance_lock.cpp
   src/db/seed.cpp
   src/db/user_admin.cpp
   src/problem/validation.cpp
@@ -108,6 +110,7 @@ add_library(oj_core STATIC
   src/judge/manager.cpp
   src/submit/submit.cpp
   src/submit/rejudge.cpp
+  src/submit/recovery.cpp
 )
 
 target_include_directories(oj_core PUBLIC
@@ -536,3 +539,24 @@ add_executable(oj_rejudge_api_test
 target_link_libraries(oj_rejudge_api_test PRIVATE oj_core)
 
 add_test(NAME rejudge_api COMMAND oj_rejudge_api_test)
+
+# M3.7 在途任务持久化与单实例互斥单元测试（gtest）：InFlightStore 状态机、任务标识
+# 生成、分批读取/原子认领/中断/失效认领重置、InstanceLock 互斥与释放（隔离临时文件库）。
+add_executable(oj_m37_in_flight_unit
+  tests/unit/test_m37_in_flight_unit.cpp
+)
+
+target_link_libraries(oj_m37_in_flight_unit PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME m37_in_flight_unit COMMAND oj_m37_in_flight_unit)
+
+# M3.7 崩溃恢复与在途任务持久化集成测试（隔离临时库 + 随机端口 + 受控执行器）：
+# 接收即持久化、容量拒绝不落库、原子结算唯一、启动恢复重放并保留原提交时间/首次 AC、
+# 恢复容量等待不丢弃、无法判题标记中断、删题保护、旧库终态不误恢复、Rejudge 不涉在途。
+add_executable(oj_m37_recovery_api_test
+  tests/integration/test_m37_recovery_api.cpp
+)
+
+target_link_libraries(oj_m37_recovery_api_test PRIVATE oj_core)
+
+add_test(NAME m37_recovery_api COMMAND oj_m37_recovery_api_test)

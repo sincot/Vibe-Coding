@@ -6,6 +6,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "db/in_flight.h"
 #include "db/problems.h"
 #include "db/submissions.h"
 #include "judge/executor.h"
@@ -90,7 +91,15 @@ public:
   enum class Kind {
     Ok,              // 判题完成并已持久化（判题结果可为 AC/WA/CE/TLE/RE/MLE/SYSERR）
     ProblemNotFound, // 题目不存在，或当前用户无权访问（统一处理，不泄露存在性）
+    AlreadySettled,  // 在途任务已被结算（重复结算被拒绝，不产生第二条记录）
     InternalError,   // 数据库等内部故障
+  };
+
+  // 在途任务持久化的结果（M3.7 接收边界）。
+  enum class PersistKind {
+    Ok,              // 已写入一条 pending 在途记录
+    ProblemNotFound, // 题目不存在或已删除（不产生在途任务）
+    InternalError,   // 数据库写入失败（不产生在途任务）
   };
 
   struct Outcome {
@@ -100,6 +109,19 @@ public:
     std::string error;
   };
 
+  // 在任务开始执行前持久化一条可恢复的在途记录（M3.7 接收边界）。成功后
+  // out_task_id 为持久化任务标识；未通过题目存在性检查或写库失败时不产生记录。
+  // 调用方须在「容量预留成功」后调用，收到失败结果时释放预留，不留下可执行任务。
+  PersistKind persist_in_flight(std::int64_t user_id, std::int64_t problem_id,
+                                const std::string &language,
+                                const std::string &source_code,
+                                const std::string &submitted_at,
+                                std::string &out_task_id, std::string &error);
+
+  // 放弃一个尚未入队的在途任务（如容量预留有效但入队意外失败）：标记为中断，
+  // 避免它被后续启动恢复意外执行。使用独立短事务。
+  void discard_in_flight(const std::string &task_id);
+
   // viewer_is_admin=true 时允许向隐藏题目提交（仅供已通过管理员检查的调用方传入）。
   //
   // submitted_at 为原始提交时间（调度器接受入队时采集的 UTC 时间字符串），
@@ -108,16 +130,26 @@ public:
   //
   // cancel 非空时支持服务停止取消：不再启动新进程，正在运行/编译的进程组会被终止，
   // 取消结果按内部错误 SYSERR 正常持久化（先于数据库关闭）。
+  //
+  // in_flight_task_id 非空表示该任务已由 persist_in_flight 持久化：结算时在同一个
+  // 短事务内删除对应在途记录并保证同一任务只结算一次；同时不再在判题阶段重新执行
+  // 可见性判断（接收时的判定即为最终判定）。为空时保持原有直接提交语义。
   Outcome submit(std::int64_t user_id, std::int64_t problem_id,
                  const std::string &language, const std::string &source_code,
                  bool viewer_is_admin, const std::string &submitted_at,
-                 const judge::CancellationToken *cancel = nullptr);
+                 const judge::CancellationToken *cancel = nullptr,
+                 const std::string &in_flight_task_id = "");
 
 private:
+  // 将无法判题的在途任务标记为中断（保留任务信息，不参与统计），使用独立短事务。
+  void settle_interrupted(const std::string &in_flight_task_id,
+                          const std::string &reason);
+
   Database &db_;
   ProblemStore problems_;
   SubmissionStore submissions_;
   UserProblemStatusStore statuses_;
+  InFlightStore in_flight_;
   judge::IExecutor &executor_;
   judge::JudgeOptions options_;
 };

@@ -24,6 +24,8 @@ const char *outcome_kind_name(submit::SubmitService::Kind kind) {
     return "Ok";
   case submit::SubmitService::Kind::ProblemNotFound:
     return "ProblemNotFound";
+  case submit::SubmitService::Kind::AlreadySettled:
+    return "AlreadySettled";
   case submit::SubmitService::Kind::InternalError:
     return "InternalError";
   }
@@ -90,7 +92,7 @@ JudgeManager::SubmitResult JudgeManager::submit(SubmissionTask task) {
       result.status = EnqueueStatus::Stopped;
       return result;
     }
-    if (queue_.size() >= queue_capacity_) {
+    if (queue_.size() + reserved_ >= queue_capacity_) {
       result.status = EnqueueStatus::QueueFull;
       return result;
     }
@@ -107,6 +109,82 @@ JudgeManager::SubmitResult JudgeManager::submit(SubmissionTask task) {
                           std::to_string(task_user_id) + "，题目 " +
                           std::to_string(task_problem_id) + "）");
   return result;
+}
+
+JudgeManager::Reservation JudgeManager::reserve() {
+  Reservation reservation;
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (stopped_) {
+    reservation.status = EnqueueStatus::Stopped;
+    return reservation;
+  }
+  if (queue_.size() + reserved_ >= queue_capacity_) {
+    reservation.status = EnqueueStatus::QueueFull;
+    return reservation;
+  }
+  ++reserved_;
+  reservation.ok = true;
+  reservation.status = EnqueueStatus::Accepted;
+  return reservation;
+}
+
+JudgeManager::SubmitResult
+JudgeManager::commit(SubmissionTask task, const Reservation &reservation) {
+  SubmitResult result;
+  if (!reservation.ok) {
+    result.status = reservation.status;
+    return result;
+  }
+  if (task.task_id == 0) {
+    task.task_id = next_task_id_.fetch_add(1);
+  }
+  const std::int64_t task_id = task.task_id;
+  const std::int64_t task_user_id = task.user_id;
+  const std::int64_t task_problem_id = task.problem_id;
+  auto item = std::make_shared<Item>(std::move(task));
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (reserved_ > 0) {
+      --reserved_;
+    }
+    // 防御：若 worker 已被回收（shutdown 之后才提交预留），不能入队后永久等待，
+    // 直接以内部错误交付结果；在途记录由下次启动恢复处理。正常停止流程保证
+    // shutdown 前所有 HTTP 请求（含 commit）已结束，此分支不应触发。
+    if (workers_stop_) {
+      item->task.cancel->cancel();
+      result.future = item->promise.get_future();
+      item->promise.set_value(
+          make_internal_error("判题调度器已回收，任务未执行"));
+      result.status = EnqueueStatus::Accepted;
+      return result;
+    }
+    // 预留期间若调度器被停止，任务仍入队，但立即带取消令牌结算（SYSERR），
+    // 不会留下永不完成的结果通道，也不会被误当作「未接收」。
+    if (stopped_) {
+      item->task.cancel->cancel();
+    }
+    result.future = item->promise.get_future();
+    queue_.push_back(std::move(item));
+    not_empty_.notify_one();
+    result.status = EnqueueStatus::Accepted;
+  }
+
+  accepted_.fetch_add(1);
+  log(LogLevel::Info, "判题任务 #" + std::to_string(task_id) + " 已接收（用户 " +
+                          std::to_string(task_user_id) + "，题目 " +
+                          std::to_string(task_problem_id) + "）");
+  return result;
+}
+
+void JudgeManager::release(const Reservation &reservation) {
+  if (!reservation.ok) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (reserved_ > 0) {
+    --reserved_;
+  }
 }
 
 std::size_t JudgeManager::queued_count() const {
@@ -153,6 +231,14 @@ void JudgeManager::shutdown() {
   // 任务会被 worker 依次取出并交付取消结果，已接收任务的结果通道不会永久挂起。
   cancel_all();
 
+  // 置位「允许 worker 退出」并唤醒：worker 会继续排空队列后才退出。cancel_all 只
+  // 停止接收，不导致 worker 提前退出，从而保证预留尚未 commit 的任务仍能被处理。
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    workers_stop_ = true;
+  }
+  not_empty_.notify_all();
+
   for (std::thread &worker : workers_) {
     if (worker.joinable()) {
       worker.join();
@@ -179,10 +265,10 @@ void JudgeManager::worker_loop() {
     std::shared_ptr<Item> item;
     {
       std::unique_lock<std::mutex> lock(mutex_);
-      not_empty_.wait(lock, [this]() { return !queue_.empty() || stopped_; });
+      not_empty_.wait(lock, [this]() { return !queue_.empty() || workers_stop_; });
       if (queue_.empty()) {
-        if (stopped_) {
-          return; // 已停止且队列已排空
+        if (workers_stop_) {
+          return; // shutdown 已允许退出且队列已排空
         }
         continue;
       }

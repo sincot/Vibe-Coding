@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -26,6 +27,7 @@
 #include "judge/executor.h"
 #include "judge/judge.h"
 #include "judge/manager.h"
+#include "submit/recovery.h"
 #include "submit/rejudge.h"
 #include "submit/submit.h"
 
@@ -74,6 +76,11 @@ public:
 
   // 绑定并启动监听。成功返回 true；失败时返回 false 并通过 error 给出原因。
   bool start(std::string &error);
+
+  // 启动恢复（M3.7）：扫描数据库中未结算的在途任务，按有界队列容量分批重新入队
+  // 判题；无法判题的任务标记为中断。应在开始接收新提交前调用（main 在 start 前
+  // 调用）。返回本次重新入队的任务数。
+  std::size_t recover_pending_tasks();
 
   // 请求停止并等待监听线程退出（可重复调用，幂等）。随后停止判题调度器：不再接收
   // 新任务，并执行完所有已接收任务后回收 worker，保证在关闭数据库前没有 worker
@@ -165,6 +172,8 @@ private:
   // 判题任务调度器：持有 worker 线程池与有界等待队列，在 submit_service_ /
   // rejudge_service_ 之后构造、之前析构，确保调度器停止时服务仍然有效。
   std::unique_ptr<judge::JudgeManager> judge_manager_;
+  // 启动恢复服务：绑定同一个 JudgeManager，按有界队列分批重新入队未结算任务。
+  std::unique_ptr<submit::RecoveryService> recovery_service_;
   // 重判并发去重：同一提交 ID 同时只能有一个待执行或正在执行的重判。
   std::mutex rejudge_mutex_;
   std::unordered_set<std::int64_t> rejudge_in_flight_;

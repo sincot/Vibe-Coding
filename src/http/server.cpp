@@ -11,6 +11,7 @@
 #include "auth/password.h"
 #include "auth/password_change.h"
 #include "auth/validation.h"
+#include "db/in_flight.h"
 #include "judge/local_executor.h"
 #include "log.h"
 #include "problem/list_query.h"
@@ -360,9 +361,15 @@ HttpServer::HttpServer(std::string host, int port, Database &db,
         return submit_service_->submit(task.user_id, task.problem_id,
                                        task.language, task.source_code,
                                        task.viewer_is_admin, task.submitted_at,
-                                       task.cancel.get());
+                                       task.cancel.get(),
+                                       task.in_flight_task_id);
       },
       manager_options);
+
+  // 启动恢复服务：实例标识用于任务认领归属，便于排查多实例/崩溃后的占用。
+  recovery_service_ = std::make_unique<submit::RecoveryService>(
+      db, *judge_manager_, generate_task_id(),
+      submit::RecoveryService::Options());
 
   // 协调 HTTP 处理线程与判题并发：最坏情况下被同步等待占用的 HTTP 线程数不超过
   // 「正在执行的判题任务 + 等待队列容量」，再额外保留 kHttpReserveThreads 个线程
@@ -400,7 +407,18 @@ bool HttpServer::start(std::string &error) {
   return true;
 }
 
+std::size_t HttpServer::recover_pending_tasks() {
+  if (!recovery_service_) {
+    return 0;
+  }
+  return recovery_service_->run();
+}
+
 void HttpServer::stop() {
+  // 先请求中止启动恢复投递（若正在恢复），避免停止流程与恢复互相等待。
+  if (recovery_service_) {
+    recovery_service_->abort();
+  }
   if (running_.exchange(false)) {
     // 停止顺序（避免 HTTP 线程与判题器互相等待）：
     //   1) 先通知判题调度器取消：正在执行的判题任务尽快终止子进程，等待队列中的任务
@@ -1010,36 +1028,87 @@ void HttpServer::handle_submit(const httplib::Request &req,
   }
 
   // 5. 可见性：管理员（已登录 + 已完成首次改密 + admin 角色）可向隐藏题提交，
-  //    其余用户按 M1.4 规则仅可向可见题提交。
+  //    其余用户按 M1.4 规则仅可向可见题提交。此检查在写库前完成，未通过时绝不
+  //    产生可执行的在途任务。
   const bool is_admin = auth::check_admin(user) == auth::AdminCheck::Ok;
 
-  // 6. 构造自带完整数据的调度任务（不引用请求对象/局部变量/数据库语句），交给
-  //    JudgeManager。原始提交时间在接受入队时采集，排队等待不计入用户程序耗时。
+  bool problem_found = false;
+  ProblemRecord problem;
+  if (!problem_store_.find_by_id(problem_id, problem_found, problem, err)) {
+    log(LogLevel::Error, "提交：题目查询失败: " + err);
+    send_error(res, 500, "内部错误");
+    return;
+  }
+  if (!problem_found || (!problem.visible && !is_admin)) {
+    send_error(res, 404, "题目不存在");
+    return;
+  }
+
+  // 6. 接收边界，顺序为「容量预留 → 写库 → 入队」，保证一致：
+  //    - 容量检查失败不写库、不产生任务；
+  //    - 写库失败释放预留，明确返回错误，不声称已接收；
+  //    - 写库成功后才入队，崩溃时任务仍在库中可恢复。
+  const std::string submitted_at = submit::utc_timestamp_now();
+  judge::JudgeManager::Reservation reservation = judge_manager_->reserve();
+  if (reservation.status == judge::JudgeManager::EnqueueStatus::QueueFull) {
+    send_judge_queue_full(res);
+    return;
+  }
+  if (reservation.status == judge::JudgeManager::EnqueueStatus::Stopped) {
+    send_judge_unavailable(res);
+    return;
+  }
+
+  std::string in_flight_task_id;
+  std::string persist_error;
+  submit::SubmitService::PersistKind persisted = submit_service_->persist_in_flight(
+      user.id, problem_id, canonical_language, source_code, submitted_at,
+      in_flight_task_id, persist_error);
+  if (persisted != submit::SubmitService::PersistKind::Ok) {
+    judge_manager_->release(reservation);
+    if (persisted == submit::SubmitService::PersistKind::ProblemNotFound) {
+      send_error(res, 404, "题目不存在");
+      return;
+    }
+    log(LogLevel::Error, "提交：持久化在途任务失败（用户 " +
+                             std::to_string(user.id) + "，题目 " +
+                             std::to_string(problem_id) + "）： " +
+                             persist_error);
+    send_error(res, 500, "内部错误");
+    return;
+  }
+
+  // 7. 构造自带完整数据的调度任务并提交预留槽位。原始提交时间在接收时采集，
+  //    排队等待不计入用户程序耗时；任务携带在途标识，结算时删除对应记录。
   judge::SubmissionTask task;
   task.user_id = user.id;
   task.problem_id = problem_id;
   task.language = canonical_language;
   task.source_code = source_code;
   task.viewer_is_admin = is_admin;
-  task.submitted_at = submit::utc_timestamp_now();
+  task.submitted_at = submitted_at;
+  task.in_flight_task_id = in_flight_task_id;
 
   judge::JudgeManager::SubmitResult enqueued =
-      judge_manager_->submit(std::move(task));
-  if (enqueued.status == judge::JudgeManager::EnqueueStatus::QueueFull) {
-    // 队列满载：未接收请求不创建提交记录、不增加提交次数（在入队前即被拒绝）。
-    send_judge_queue_full(res);
-    return;
-  }
-  if (enqueued.status == judge::JudgeManager::EnqueueStatus::Stopped) {
+      judge_manager_->commit(std::move(task), reservation);
+  if (enqueued.status != judge::JudgeManager::EnqueueStatus::Accepted) {
+    // 预留有效时 commit 必成功；此处仅作防御，若失败则放弃在途记录避免误恢复。
+    log(LogLevel::Error, "提交：入队失败（在途任务 " + in_flight_task_id + "）");
+    submit_service_->discard_in_flight(in_flight_task_id);
     send_judge_unavailable(res);
     return;
   }
 
-  // 7. 同步等待该提交的判题与持久化结果（结果通道与本次请求一一对应）。
+  // 8. 同步等待该提交的判题与持久化结果（结果通道与本次请求一一对应）。
   submit::SubmitService::Outcome outcome = enqueued.future.get();
   switch (outcome.kind) {
     case submit::SubmitService::Kind::ProblemNotFound:
       send_error(res, 404, "题目不存在");
+      return;
+    case submit::SubmitService::Kind::AlreadySettled:
+      log(LogLevel::Error, "提交：任务 " + in_flight_task_id +
+                               " 已被结算，拒绝重复结算");
+      send_error(res, 500, "内部错误");
       return;
     case submit::SubmitService::Kind::InternalError:
       log(LogLevel::Error, "提交失败（用户 " + std::to_string(user.id) +
@@ -1212,7 +1281,7 @@ void HttpServer::handle_admin_delete_problem(const httplib::Request &req,
       send_error(res, 404, "题目不存在");
       return;
     case ProblemAdminStore::DeleteStatus::HasSubmissions:
-      send_error(res, 409, "题目已有提交记录，无法删除");
+      send_error(res, 409, "题目已有提交记录或正在判题的任务，无法删除");
       return;
     case ProblemAdminStore::DeleteStatus::Error:
       log(LogLevel::Error, "删除题目失败: " + err);

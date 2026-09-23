@@ -1,5 +1,6 @@
 #include <chrono>
 #include <csignal>
+#include <cstddef>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -8,6 +9,7 @@
 #include "auth/jwt.h"
 #include "config.h"
 #include "db/database.h"
+#include "db/instance_lock.h"
 #include "db/schema.h"
 #include "db/seed.h"
 #include "http/server.h"
@@ -116,6 +118,14 @@ int main(int argc, char **argv) {
   }
   oj::log(oj::LogLevel::Info, "数据库结构初始化完成");
 
+  // 单实例互斥（M3.7）：对数据库锁文件持有 flock，防止两个服务实例同时操作/
+  // 恢复同一批在途任务。进程崩溃时由操作系统自动释放，无需人工清理。
+  auto instance_lock = oj::InstanceLock::acquire(cfg.db_path, error);
+  if (!instance_lock) {
+    oj::log(oj::LogLevel::Error, "实例互斥检查失败: " + error);
+    return 1;
+  }
+
   // 加载 JWT 配置：密钥缺失或无效时立即报错退出，绝不以公开默认密钥启动。
   oj::auth::JwtConfig jwt_config;
   std::string jwt_error;
@@ -209,6 +219,16 @@ int main(int argc, char **argv) {
                         /*judge_options=*/std::move(judge_options),
                         /*web_root=*/cfg.web_root,
                         /*manager_options=*/manager_options);
+
+  // 启动恢复（M3.7）：数据库迁移与判题环境检查已完成，在开始接收新提交前扫描并
+  // 重新入队崩溃前未结算的在途任务。恢复与新提交共用同一有界队列与 worker。
+  const std::size_t recovered = server.recover_pending_tasks();
+  if (recovered > 0) {
+    oj::log(oj::LogLevel::Info, "启动恢复：已重新入队 " +
+                                    std::to_string(recovered) +
+                                    " 个未结算在途任务");
+  }
+
   if (!server.start(error)) {
     oj::log(oj::LogLevel::Error, "启动失败: " + error);
     return 1;

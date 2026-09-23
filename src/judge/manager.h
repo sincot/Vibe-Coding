@@ -48,6 +48,10 @@ struct SubmissionTask {
   // 重判标识：非 0 时表示这是对指定 submissions.id 的重判，handler 应走重判路径。
   // 普通提交保持 0。
   std::int64_t rejudge_submission_id = 0;
+  // 持久化在途任务标识（M3.7）：非空表示该任务已在独立在途表中持久化，handler
+  // 结算时须删除对应在途记录（保证同一任务只最终落库一次）。重判与外层未启用
+  // 在途持久化的直接调用保持空串。
+  std::string in_flight_task_id;
 };
 
 // 判题任务调度器（SPEC JUDGE-09 / M3.1 架构图中的 JudgeManager）。
@@ -96,6 +100,14 @@ public:
     std::future<submit::SubmitService::Outcome> future;
   };
 
+  // 接收容量预留（M3.7 接收边界）：在写库前先原子占用一个等待槽位，保证
+  // 「容量检查 → 写库 → 入队」一致，避免出现「已接受但没保存」或「明确拒绝
+  // 却仍执行」。ok=true 时表示已预留，必须随后恰好调用一次 commit 或 release。
+  struct Reservation {
+    bool ok = false;
+    EnqueueStatus status = EnqueueStatus::Stopped;
+  };
+
   JudgeManager(Handler handler, Options options = {});
   ~JudgeManager();
 
@@ -105,6 +117,18 @@ public:
   // 尝试接收一个任务。入队判断与入队在同一锁内原子完成；队列满或已停止时立即
   // 返回对应状态，绝不阻塞等待。
   SubmitResult submit(SubmissionTask task);
+
+  // 预留一个等待槽位（不阻塞）：队列满返回 QueueFull，已停止返回 Stopped，
+  // 成功返回 ok=true 的 Accepted 预留。此期间槽位对其他接收者可见。
+  Reservation reserve();
+
+  // 使用预留槽位提交任务：正常必成功返回 Accepted（含有效 future）；预留无效时
+  // 返回对应失败状态。若调度器在预留与提交之间被停止，任务仍会入队并立即带取消
+  // 令牌走结算，不会留下永不完成的结果通道。
+  SubmitResult commit(SubmissionTask task, const Reservation &reservation);
+
+  // 放弃预留（如写库失败）：仅释放槽位，不产生任务。
+  void release(const Reservation &reservation);
 
   // 停止接收新任务，唤醒等待线程，执行完所有已接收任务后回收 worker。
   // 可重复调用；已接收任务的结果一定被投递，不会留下永久等待的 future。
@@ -148,10 +172,17 @@ private:
   mutable std::mutex mutex_;
   std::condition_variable not_empty_;
   std::deque<std::shared_ptr<Item>> queue_;
+  // 已预留但尚未入队的槽位数（M3.7）。与 queue_.size() 共同计入容量，保证并发
+  // 接收在「写库」阶段也受同一容量约束。
+  std::size_t reserved_ = 0;
   // 正在执行任务的原始指针集合（Item 由对应 worker 的 shared_ptr 保活，仅在锁内
   // 访问）。服务停止时据此取消正在执行的子进程。
   std::set<Item *> active_items_;
+  // stopped_：停止接收（cancel_all / shutdown 置位）；workers_stop_：允许 worker
+  // 退出（仅 shutdown 置位）。二者分离，避免 cancel_all 后队列暂空时 worker 提前
+  // 退出，导致随后 commit 的预留任务无人执行、结果通道永久挂起。
   bool stopped_ = false;
+  bool workers_stop_ = false;
 
   std::atomic<std::size_t> active_{0};
   // 任务标识分配器与「已接收 / 已完成」计数，用于日志关联与停止收尾核对。

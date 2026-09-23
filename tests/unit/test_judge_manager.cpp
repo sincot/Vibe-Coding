@@ -473,4 +473,154 @@ TEST(JudgeManagerCancel, AllCancelsActiveAndQueuedWithoutBlocking) {
   manager.shutdown();
 }
 
+// ---------------------------------------------------------------------------
+// M3.7 接收容量预留：reserve / commit / release
+// ---------------------------------------------------------------------------
+
+TEST(JudgeManagerReservation, ReserveConsumesCapacityUntilReleased) {
+  Gate gate;
+  JudgeManager manager(
+      [&](const SubmissionTask &) {
+        gate.enter();
+        return ok_outcome();
+      },
+      JudgeManager::Options(/*capacity=*/1, /*workers=*/1));
+
+  // 预留占用唯一等待槽位：再预留应满载。
+  auto first = manager.reserve();
+  ASSERT_TRUE(first.ok);
+  EXPECT_EQ(first.status, JudgeManager::EnqueueStatus::Accepted);
+  auto blocked = manager.reserve();
+  EXPECT_FALSE(blocked.ok);
+  EXPECT_EQ(blocked.status, JudgeManager::EnqueueStatus::QueueFull);
+
+  // 释放后可再次预留，且 commit 正常交付结果。
+  manager.release(first);
+  auto again = manager.reserve();
+  ASSERT_TRUE(again.ok);
+  auto committed = manager.commit(make_task(7), again);
+  ASSERT_EQ(committed.status, JudgeManager::EnqueueStatus::Accepted);
+  ASSERT_TRUE(gate.wait_entered(1, kWait));
+  gate.release();
+  EXPECT_EQ(committed.future.get().kind, SubmitService::Kind::Ok);
+
+  manager.shutdown();
+}
+
+TEST(JudgeManagerReservation, CommitWithInvalidReservationReturnsFailure) {
+  Gate gate;
+  JudgeManager manager(
+      [&](const SubmissionTask &) {
+        gate.enter();
+        return ok_outcome();
+      },
+      JudgeManager::Options(/*capacity=*/1, /*workers=*/1));
+
+  auto held = manager.reserve();
+  ASSERT_TRUE(held.ok);
+  auto full = manager.reserve();
+  ASSERT_FALSE(full.ok);
+  EXPECT_EQ(full.status, JudgeManager::EnqueueStatus::QueueFull);
+
+  // 用无效预留提交：返回对应失败状态、无 future，且不占用容量。
+  auto bad = manager.commit(make_task(5), full);
+  EXPECT_EQ(bad.status, JudgeManager::EnqueueStatus::QueueFull);
+  EXPECT_FALSE(bad.future.valid());
+
+  // release 无效预留为空操作；重复释放已释放的预留也不会下溢容量。
+  manager.release(JudgeManager::Reservation{});
+  manager.release(held);
+  manager.release(held);
+
+  // 容量已恢复：可再预留一次，第二次因容量 1 满载。
+  auto a = manager.reserve();
+  EXPECT_TRUE(a.ok);
+  auto b = manager.reserve();
+  EXPECT_FALSE(b.ok);
+  EXPECT_EQ(b.status, JudgeManager::EnqueueStatus::QueueFull);
+  manager.release(a);
+  manager.shutdown();
+}
+
+TEST(JudgeManagerReservation, ReleaseDoNotUnderflowAndRestoreCapacity) {
+  JudgeManager manager([](const SubmissionTask &) { return ok_outcome(); },
+                       JudgeManager::Options(/*capacity=*/2, /*workers=*/1));
+  auto r = manager.reserve();
+  ASSERT_TRUE(r.ok);
+  manager.release(r);
+  manager.release(r); // 重复释放应被保护，不下溢
+
+  auto a = manager.reserve();
+  auto b = manager.reserve();
+  EXPECT_TRUE(a.ok);
+  EXPECT_TRUE(b.ok);
+  auto c = manager.reserve();
+  EXPECT_FALSE(c.ok);
+  EXPECT_EQ(c.status, JudgeManager::EnqueueStatus::QueueFull);
+  manager.release(a);
+  manager.release(b);
+  manager.shutdown();
+}
+
+TEST(JudgeManagerReservation, ConcurrentReserveCannotExceedCapacity) {
+  JudgeManager manager([](const SubmissionTask &) { return ok_outcome(); },
+                       JudgeManager::Options(/*capacity=*/1, /*workers=*/1));
+  auto held = manager.reserve();
+  ASSERT_TRUE(held.ok);
+
+  constexpr int kThreads = 16;
+  std::atomic<int> accepted{0};
+  std::atomic<int> rejected{0};
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kThreads; ++i) {
+    threads.emplace_back([&]() {
+      auto r = manager.reserve();
+      if (r.ok) {
+        accepted.fetch_add(1);
+        manager.release(r);
+      } else if (r.status == JudgeManager::EnqueueStatus::QueueFull) {
+        rejected.fetch_add(1);
+      }
+    });
+  }
+  for (auto &thread : threads) {
+    thread.join();
+  }
+  // 槽位已被 held 占用，所有并发预留都应被拒绝。
+  EXPECT_EQ(accepted.load(), 0);
+  EXPECT_EQ(rejected.load(), kThreads);
+  manager.release(held);
+  manager.shutdown();
+}
+
+TEST(JudgeManagerReservation, CommitAfterCancelStillDeliversCanceledTask) {
+  Gate gate;
+  std::atomic<bool> saw_cancel{false};
+  JudgeManager manager(
+      [&](const SubmissionTask &task) {
+        saw_cancel.store(task.cancel && task.cancel->cancelled());
+        gate.enter();
+        return ok_outcome();
+      },
+      JudgeManager::Options(/*capacity=*/4, /*workers=*/1));
+
+  auto reservation = manager.reserve();
+  ASSERT_TRUE(reservation.ok);
+
+  // 预留期间服务开始停止：commit 仍必须入队并交付结果（带取消令牌），不永久挂起。
+  manager.cancel_all();
+  auto committed = manager.commit(make_task(42), reservation);
+  ASSERT_EQ(committed.status, JudgeManager::EnqueueStatus::Accepted);
+  ASSERT_TRUE(gate.wait_entered(1, kWait));
+  gate.release();
+  EXPECT_EQ(committed.future.get().kind, SubmitService::Kind::Ok);
+  EXPECT_TRUE(saw_cancel.load());
+
+  // 停止后新预留立即被拒。
+  auto after = manager.reserve();
+  EXPECT_FALSE(after.ok);
+  EXPECT_EQ(after.status, JudgeManager::EnqueueStatus::Stopped);
+  manager.shutdown();
+}
+
 } // namespace

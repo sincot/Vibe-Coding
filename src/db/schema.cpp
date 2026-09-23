@@ -9,7 +9,11 @@ namespace oj {
 
 namespace {
 
-// 五张业务表的建表脚本（见 SPEC 3.2）。
+// 业务表建表脚本（见 SPEC 3.2）。
+//
+// M3.7 起在原五张业务表之外新增独立的「在途任务」表 in_flight_tasks：提交被
+// 接收后、最终结算前保存可恢复的任务信息；在途记录不参与 submit_count / AC /
+// 排行榜统计，也不改变 submissions.status 的 CHECK 约束（见 schema 下方说明）。
 //
 // 说明：
 //  - 使用 IF NOT EXISTS，保证重复初始化不清空、不重建已有数据。
@@ -90,6 +94,33 @@ const char *const kSchemaStatements[] = {
       submit_count INTEGER NOT NULL DEFAULT 0,
       UNIQUE(user_id, problem_id)
     ))sql",
+
+    // 在途任务（M3.7 崩溃恢复与在途任务持久化）
+    //
+    // 采用独立表而非扩展 submissions：在途记录在最终结算前不计入 submit_count、
+    // AC 状态、通过人数与排行榜，避免崩溃导致虚增计数或假 AC；既有 submissions
+    // 读取/统计接口无需过滤在途状态即可保持兼容。submissions.status 的 CHECK
+    // 约束也不受影响。
+    //
+    // 状态机：
+    //   pending     —— 已持久化的可恢复在途任务（尚未被恢复认领）
+    //   claimed     —— 启动恢复已认领并重新入队；进程再次崩溃时下次启动重置回 pending
+    //   interrupted —— 确认无法判题（如题目不存在），保留任务信息但不再恢复
+    // 任务完成后在结算事务内删除该行，配合 task_id UNIQUE 保证同一任务只结算一次。
+    R"sql(
+    CREATE TABLE IF NOT EXISTS in_flight_tasks (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id      TEXT NOT NULL UNIQUE,
+      user_id      INTEGER NOT NULL REFERENCES users(id),
+      problem_id   INTEGER NOT NULL REFERENCES problems(id),
+      language     TEXT NOT NULL,
+      source_code  TEXT NOT NULL,
+      submitted_at TEXT NOT NULL,
+      state        TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'claimed', 'interrupted')),
+      owner        TEXT NOT NULL DEFAULT '',
+      claimed_at   TEXT,
+      reason       TEXT NOT NULL DEFAULT ''
+    ))sql",
 };
 
 // 按已有查询需求配置的索引（IF NOT EXISTS，重复初始化幂等）。
@@ -105,6 +136,9 @@ const char *const kIndexStatements[] = {
     "CREATE INDEX IF NOT EXISTS idx_submissions_problem ON submissions(problem_id);",
     // 题目「通过人数」统计（按 problem_id 聚合）
     "CREATE INDEX IF NOT EXISTS idx_user_problem_status_problem ON user_problem_status(problem_id);",
+    // 在途任务：启动恢复按状态分批扫描；删题保护按题目统计未结算记录
+    "CREATE INDEX IF NOT EXISTS idx_in_flight_state ON in_flight_tasks(state);",
+    "CREATE INDEX IF NOT EXISTS idx_in_flight_problem ON in_flight_tasks(problem_id);",
 };
 
 // 在事务内执行 body；失败自动回滚并保留原始错误。

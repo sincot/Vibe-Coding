@@ -159,16 +159,101 @@ std::string utc_timestamp_now() {
 
 SubmitService::SubmitService(Database &db, judge::IExecutor &executor,
                              judge::JudgeOptions options)
-    : db_(db), problems_(db), submissions_(db), statuses_(db),
+    : db_(db), problems_(db), submissions_(db), statuses_(db), in_flight_(db),
       executor_(executor), options_(std::move(options)) {}
 
-SubmitService::Outcome SubmitService::submit(std::int64_t user_id,
-                                             std::int64_t problem_id,
-                                             const std::string &language,
-                                             const std::string &source_code,
-                                             bool viewer_is_admin,
-                                             const std::string &submitted_at,
-                                             const judge::CancellationToken *cancel) {
+SubmitService::PersistKind SubmitService::persist_in_flight(
+    std::int64_t user_id, std::int64_t problem_id,
+    const std::string &language, const std::string &source_code,
+    const std::string &submitted_at, std::string &out_task_id,
+    std::string &error) {
+  std::lock_guard<std::mutex> transaction_lock(db_.transaction_mutex());
+  std::string err;
+  if (!db_.begin(err)) {
+    log(LogLevel::Error, "接收：开启事务失败: " + err);
+    error = "内部错误";
+    return PersistKind::InternalError;
+  }
+
+  // 事务内复核题目存在：避免在可见性检查后被并发删题，产生悬挂在途记录。
+  bool found = false;
+  ProblemRecord problem;
+  if (!problems_.find_by_id(problem_id, found, problem, err)) {
+    log(LogLevel::Error, "接收：题目查询失败: " + err);
+    db_.rollback(err);
+    error = "内部错误";
+    return PersistKind::InternalError;
+  }
+  if (!found) {
+    db_.rollback(err);
+    return PersistKind::ProblemNotFound;
+  }
+
+  InFlightTask task;
+  task.user_id = user_id;
+  task.problem_id = problem_id;
+  task.language = language;
+  task.source_code = source_code;
+  task.submitted_at =
+      submitted_at.empty() ? utc_timestamp_now() : submitted_at;
+
+  std::int64_t new_id = 0;
+  if (!in_flight_.insert(task, new_id, err)) {
+    log(LogLevel::Error, "接收：写入在途记录失败: " + err);
+    db_.rollback(err);
+    error = "内部错误";
+    return PersistKind::InternalError;
+  }
+  if (!db_.commit(err)) {
+    log(LogLevel::Error, "接收：提交在途记录事务失败: " + err);
+    db_.rollback(err);
+    error = "内部错误";
+    return PersistKind::InternalError;
+  }
+  out_task_id = task.task_id;
+  log(LogLevel::Info, "接收在途任务 " + task.task_id + "（用户 " +
+                          std::to_string(user_id) + "，题目 " +
+                          std::to_string(problem_id) + "）");
+  return PersistKind::Ok;
+}
+
+void SubmitService::discard_in_flight(const std::string &task_id) {
+  settle_interrupted(task_id, "入队失败，已放弃执行");
+}
+
+void SubmitService::settle_interrupted(const std::string &in_flight_task_id,
+                                       const std::string &reason) {
+  if (in_flight_task_id.empty()) {
+    return;
+  }
+  std::lock_guard<std::mutex> transaction_lock(db_.transaction_mutex());
+  std::string err;
+  if (!db_.begin(err)) {
+    log(LogLevel::Error,
+        "在途任务 " + in_flight_task_id + " 标记中断失败（开启事务）: " + err);
+    return;
+  }
+  if (!in_flight_.mark_interrupted(in_flight_task_id, reason, err)) {
+    log(LogLevel::Error,
+        "在途任务 " + in_flight_task_id + " 标记中断失败: " + err);
+    db_.rollback(err);
+    return;
+  }
+  if (!db_.commit(err)) {
+    log(LogLevel::Error,
+        "在途任务 " + in_flight_task_id + " 标记中断提交失败: " + err);
+    db_.rollback(err);
+    return;
+  }
+  log(LogLevel::Warn, "在途任务 " + in_flight_task_id + " 已标记为中断：" +
+                          reason);
+}
+
+SubmitService::Outcome SubmitService::submit(
+    std::int64_t user_id, std::int64_t problem_id, const std::string &language,
+    const std::string &source_code, bool viewer_is_admin,
+    const std::string &submitted_at, const judge::CancellationToken *cancel,
+    const std::string &in_flight_task_id) {
   Outcome outcome;
 
   // 1. 题目存在性与可见性（复用 M1.4 规则）。不存在与无权访问统一返回，
@@ -182,7 +267,15 @@ SubmitService::Outcome SubmitService::submit(std::int64_t user_id,
     outcome.error = "内部错误";
     return outcome;
   }
-  if (!found || (!problem.visible && !viewer_is_admin)) {
+  if (!found) {
+    // 已接收并持久化的任务在判题前发现题目消失：标记为中断并保留任务信息。
+    settle_interrupted(in_flight_task_id, "题目不存在，无法判题");
+    outcome.kind = Kind::ProblemNotFound;
+    return outcome;
+  }
+  // 已持久化的在途任务（含恢复任务）在接收时已完成可见性判定，判题阶段不再按
+  // 可见性拒绝，避免题目在排队期间被隐藏导致已接收任务无法结算。
+  if (!problem.visible && !viewer_is_admin && in_flight_task_id.empty()) {
     outcome.kind = Kind::ProblemNotFound;
     return outcome;
   }
@@ -279,9 +372,53 @@ SubmitService::Outcome SubmitService::submit(std::int64_t user_id,
     return outcome;
   }
   if (!still_found) {
-    db_.rollback(err);
+    if (in_flight_task_id.empty()) {
+      db_.rollback(err);
+      outcome.kind = Kind::ProblemNotFound;
+      return outcome;
+    }
+    // 已接收任务：在同一事务内标记为中断并提交，保留任务信息（不再恢复）。
+    if (!in_flight_.mark_interrupted(in_flight_task_id,
+                                     "题目不存在，无法判题", err)) {
+      log(LogLevel::Error, "提交：标记在途任务中断失败: " + err);
+      db_.rollback(err);
+      outcome.kind = Kind::InternalError;
+      outcome.error = "内部错误";
+      return outcome;
+    }
+    if (!db_.commit(err)) {
+      log(LogLevel::Error, "提交：提交中断标记事务失败: " + err);
+      db_.rollback(err);
+      outcome.kind = Kind::InternalError;
+      outcome.error = "内部错误";
+      return outcome;
+    }
+    log(LogLevel::Warn, "在途任务 " + in_flight_task_id +
+                            " 已标记为中断：题目不存在，无法判题");
     outcome.kind = Kind::ProblemNotFound;
     return outcome;
+  }
+
+  // 4b. 结算边界（仅针对已持久化的在途任务）：先删除在途记录，若删除未命中
+  //     （changes != 1，说明已被其它执行路径结算），则整体回滚，绝不写入第二条
+  //     提交记录。删除与提交记录/状态更新在同一事务内，保证同一任务只结算一次。
+  if (!in_flight_task_id.empty()) {
+    bool removed = false;
+    if (!in_flight_.remove_by_task_id(in_flight_task_id, removed, err)) {
+      log(LogLevel::Error, "提交：删除在途记录失败: " + err);
+      db_.rollback(err);
+      outcome.kind = Kind::InternalError;
+      outcome.error = "内部错误";
+      return outcome;
+    }
+    if (!removed) {
+      log(LogLevel::Warn, "提交：在途任务 " + in_flight_task_id +
+                              " 已被结算，拒绝重复结算");
+      db_.rollback(err);
+      outcome.kind = Kind::AlreadySettled;
+      outcome.error = "任务已结算";
+      return outcome;
+    }
   }
 
   std::int64_t new_id = 0;
@@ -330,6 +467,10 @@ SubmitService::Outcome SubmitService::submit(std::int64_t user_id,
   }
 
   record.id = new_id;
+  if (!in_flight_task_id.empty()) {
+    log(LogLevel::Info, "在途任务 " + in_flight_task_id + " 已结算为提交 #" +
+                            std::to_string(new_id) + "：" + record.status);
+  }
   outcome.kind = Kind::Ok;
   outcome.submission = std::move(record);
   outcome.judge = std::move(judge_result);
