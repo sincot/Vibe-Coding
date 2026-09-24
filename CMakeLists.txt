@@ -652,3 +652,42 @@ add_executable(oj_m52_access_control_test
 target_link_libraries(oj_m52_access_control_test PRIVATE oj_core)
 
 add_test(NAME m52_access_control COMMAND oj_m52_access_control_test)
+
+# M5.3 判题异常与安全回归——常规（有界、受控）集成测试（真实 g++/gcc + 沙箱）：
+# 输入输出异常（不读大输入、提前关闭 stdin，EPIPE 不致命）、分配失败不得误判 MLE、
+# clone/vfork 被拒绝、向宿主进程发信号被命名空间隔离拒绝、异常序列后两套语言恢复。
+# 死循环/持续输出/超内存/进程数量增长等危险类别见下方特殊目标，不注册到 CTest。
+add_executable(oj_m53_judge_abuse
+  tests/integration/test_m53_judge_abuse.cpp
+)
+
+target_link_libraries(oj_m53_judge_abuse PRIVATE oj_core)
+
+add_test(NAME m53_judge_abuse COMMAND oj_m53_judge_abuse)
+
+# M5.3 判题异常与安全回归——服务级补充集成测试（隔离临时库 + 随机端口 + 默认
+# LocalExecutor 真实沙箱）：经真实提交接口验证网络/文件/进程创建隔离、真实 MLE、
+# 真实超大输出截断，以及恶意序列后正常提交仍 AC、统计一致、无遗留子进程。
+add_executable(oj_m53_service_abuse
+  tests/integration/test_m53_service_abuse.cpp
+)
+
+target_link_libraries(oj_m53_service_abuse PRIVATE oj_core)
+
+add_test(NAME m53_service_abuse COMMAND oj_m53_service_abuse)
+
+# M5.3 判题异常与安全回归——特殊（破坏性类别）测试：
+# 持续输出 TLE、受控超内存 MLE、有限次进程创建尝试零后代，以及默认跳过的宿主机
+# 内存压力场景。**有意不注册到 CTest**，避免全量常规回归误触发死循环/超内存场景；
+# 通过自定义目标显式执行：cmake --build build --target run_m53_special
+add_executable(oj_m53_special
+  tests/integration/test_m53_special.cpp
+)
+
+target_link_libraries(oj_m53_special PRIVATE oj_core)
+
+add_custom_target(run_m53_special
+  COMMAND oj_m53_special
+  DEPENDS oj_m53_special
+  COMMENT "运行 M5.3 特殊（破坏性类别）判题异常测试（受控样例，自带内存自检）"
+)
