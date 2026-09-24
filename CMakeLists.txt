@@ -80,6 +80,7 @@ add_library(oj_core STATIC
   src/db/problem_admin.cpp
   src/db/testcase_admin.cpp
   src/db/submissions.cpp
+  src/db/leaderboard.cpp
   src/db/in_flight.cpp
   src/db/instance_lock.cpp
   src/db/seed.cpp
@@ -604,3 +605,25 @@ add_executable(oj_m44_history_api_test
 target_link_libraries(oj_m44_history_api_test PRIVATE oj_core)
 
 add_test(NAME m44_history_api COMMAND oj_m44_history_api_test)
+
+# M4.5 排行榜统计读取（数据层）单元测试（gtest）：LeaderboardStore::query 的聚合
+# （重复 AC 不重复计数、失败提交计数、AC 后失败保留、Rejudge 重算联动）、排序级联、
+# null 首次 AC、隐藏题排除、仅已结算用户、管理员同口径、分页与越界（隔离临时文件库）。
+add_executable(oj_m45_leaderboard_unit
+  tests/unit/test_m45_leaderboard_unit.cpp
+)
+
+target_link_libraries(oj_m45_leaderboard_unit PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME m45_leaderboard_unit COMMAND oj_m45_leaderboard_unit)
+
+# M4.5 排行榜接口集成测试（隔离临时库 + 随机端口）：公开访问/空库、排序与全局名次、
+# 分页与参数校验、字段范围（不泄露账号/源码等）、隐藏题排除、管理员同口径，以及
+# Rejudge 重算后的统计与排序联动。
+add_executable(oj_m45_leaderboard_api_test
+  tests/integration/test_m45_leaderboard_api.cpp
+)
+
+target_link_libraries(oj_m45_leaderboard_api_test PRIVATE oj_core)
+
+add_test(NAME m45_leaderboard_api COMMAND oj_m45_leaderboard_api_test)

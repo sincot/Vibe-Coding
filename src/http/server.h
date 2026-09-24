@@ -19,6 +19,7 @@
 #include "auth/password_change.h"
 #include "auth/rate_limit.h"
 #include "auth/register.h"
+#include "db/leaderboard.h"
 #include "db/problem_admin.h"
 #include "db/problems.h"
 #include "db/testcase_admin.h"
@@ -126,6 +127,9 @@ private:
                                 httplib::Response &res);
   // 本人题目状态（M4.4）：仅返回当前用户的 user_problem_status，无记录表示未提交。
   void handle_user_status(const httplib::Request &req, httplib::Response &res);
+  // 公开排行榜（M4.5）：游客可直接访问，只返回名次、昵称、AC 数、提交次数与
+  // 时间信息，不返回账号、密码哈希、token、源码或逐点结果。
+  void handle_leaderboard(const httplib::Request &req, httplib::Response &res);
   void handle_admin_create_problem(const httplib::Request &req,
                                    httplib::Response &res);
   void handle_admin_update_problem(const httplib::Request &req,
@@ -179,6 +183,7 @@ private:
   ProblemAdminStore problem_admin_store_;
   TestcaseAdminStore testcase_admin_store_;
   UserAdminStore user_admin_store_;
+  LeaderboardStore leaderboard_store_;
   auth::RateLimiter rate_limiter_;
   auth::RandomAccountGenerator account_gen_;
   auth::RegisterService register_service_;

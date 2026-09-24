@@ -13,6 +13,11 @@
 - `m43_problem_page_dom.mjs` + `run_m43.sh`：M4.3 题目与做题页面 DOM 级验证（题面/样例/
   限制/本人状态、降级 textarea、语言切换、`Ctrl+Enter` 去重、结果渲染规则、编辑器适配
   与释放、网络失败保留源码）。运行：`bash tests/frontend/run_m43.sh`。
+- `m44_history_dom.mjs` + `run_m44.sh`：M4.4 提交历史与详情页面 DOM 级验证。运行：
+  `bash tests/frontend/run_m44.sh`。
+- `m45_leaderboard_dom.mjs` + `run_m45.sh`：M4.5 排行榜页面 DOM 级验证（游客可访问、
+  渲染列/分页/无 AC「—」、登录当前用户高亮、退出移除高亮、刷新、无脚本错误）。运行：
+  `bash tests/frontend/run_m45.sh`。
 - `run_m43_coverage.sh`：在隔离服务上执行同一 M4.3 页面级测试，并用
   [c8](https://github.com/bcoe/c8) 采集被执行的 `web/js` 模块覆盖率。运行：
   `npm install --prefix /tmp/opencode/covtool c8 && bash tests/frontend/run_m43_coverage.sh`；

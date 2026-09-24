@@ -1233,8 +1233,40 @@ pre.code-block {
   margin-top: 12px;
 }
 
+/* ---------- 排行榜（M4.5） ---------- */
+.leaderboard-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+
+.leaderboard-table .col-rank,
+.leaderboard-table .col-ac,
+.leaderboard-table .col-submits,
+.leaderboard-table .col-time {
+  white-space: nowrap;
+}
+
+.leaderboard-table .col-nick {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 当前登录用户所在行：仅在可靠匹配 user_id 时由前端标记。 */
+table.data tbody tr.current-user {
+  background: var(--primary-soft);
+}
+
 @media (max-width: 720px) {
   .submissions-table .col-title {
+    max-width: none;
+  }
+
+  .leaderboard-table .col-nick {
     max-width: none;
   }
 

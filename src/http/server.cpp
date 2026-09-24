@@ -451,6 +451,7 @@ HttpServer::HttpServer(std::string host, int port, Database &db,
       problem_admin_store_(db),
       testcase_admin_store_(db),
       user_admin_store_(db),
+      leaderboard_store_(db),
       rate_limiter_(auth::RateLimiter::Config{}),
       account_gen_(),
       register_service_(db, account_gen_),
@@ -651,6 +652,13 @@ void HttpServer::setup_routes() {
   svr_.Get("/api/status", [this](const httplib::Request &req,
                                  httplib::Response &res) {
     handle_user_status(req, res);
+  });
+
+  // 公开排行榜（M4.5）：游客可直接访问，只读取已维护的持久化统计，不修改记录、
+  // 不重新判题、不触发补计数。
+  svr_.Get("/api/leaderboard", [this](const httplib::Request &req,
+                                      httplib::Response &res) {
+    handle_leaderboard(req, res);
   });
 
   // 管理员题目管理接口（M2.1）：建题 / 改题 / 删题。三者统一走
@@ -1526,6 +1534,63 @@ void HttpServer::handle_user_status(const httplib::Request &req,
   }
   json body;
   body["statuses"] = std::move(list);
+  send_json(res, 200, body);
+}
+
+void HttpServer::handle_leaderboard(const httplib::Request &req,
+                                    httplib::Response &res) {
+  // 公开接口：不进行身份验证，游客可直接访问。分页沿用项目既有约定
+  // （page 默认 1、正整数、每页固定 20 条）。
+  const std::string page_text =
+      req.has_param("page") ? req.get_param_value("page") : "";
+  int page = 1;
+  std::string param_error;
+  if (!useradmin::parse_page(page_text, page, param_error)) {
+    send_error(res, 400, param_error);
+    return;
+  }
+
+  LeaderboardQuery query;
+  query.page = page;
+  query.page_size = useradmin::kUserPageSize;
+
+  LeaderboardResult result;
+  std::string err;
+  if (!leaderboard_store_.query(query, result, err)) {
+    log(LogLevel::Error, "排行榜查询失败: " + err);
+    send_error(res, 500, "内部错误");
+    return;
+  }
+
+  // 名次为全局位置：第 page 页第 i 条的名次 = (page-1)*page_size + i + 1，
+  // 不随分页从 1 重新开始。只返回展示所需字段，不含账号、密码哈希、token、
+  // 源码或逐点结果。
+  json list = json::array();
+  long long rank = static_cast<long long>(page - 1) * query.page_size;
+  for (const LeaderboardEntry &entry : result.items) {
+    ++rank;
+    json item;
+    item["rank"] = rank;
+    item["user_id"] = entry.user_id;
+    item["nickname"] = entry.nickname;
+    item["ac_count"] = entry.ac_count;
+    item["submit_count"] = entry.submit_count;
+    item["first_ac_at"] =
+        entry.has_first_ac_at ? json(entry.first_ac_at) : json(nullptr);
+    item["created_at"] = entry.created_at;
+    list.push_back(std::move(item));
+  }
+
+  const long long total_pages =
+      result.total == 0
+          ? 0
+          : (result.total + query.page_size - 1) / query.page_size;
+  json body;
+  body["leaderboard"] = std::move(list);
+  body["page"] = page;
+  body["page_size"] = query.page_size;
+  body["total"] = result.total;
+  body["total_pages"] = total_pages;
   send_json(res, 200, body);
 }
 

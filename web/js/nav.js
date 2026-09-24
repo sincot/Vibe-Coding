@@ -62,14 +62,23 @@ export function renderNav() {
   const status = getAuthStatus();
   if (status === AUTH_UNKNOWN) {
     // 身份核实中：仅展示骨架，避免根据本地旧信息短暂显示后台入口。
-    nav.appendChild(h("div", { class: "nav-links" }, [navLink("题目列表", "/problems")]));
+    nav.appendChild(
+      h("div", { class: "nav-links" }, [
+        navLink("题目列表", "/problems"),
+        navLink("排行榜", "/leaderboard"),
+      ])
+    );
     nav.appendChild(h("span", { class: "nav-spacer" }));
     nav.appendChild(h("span", { class: "nav-link muted", text: "身份确认中…" }));
     renderFooterAdmin();
     return;
   }
 
-  const links = h("div", { class: "nav-links" }, [navLink("题目列表", "/problems")]);
+  const links = h("div", { class: "nav-links" }, [
+    navLink("题目列表", "/problems"),
+    // 排行榜为公开页面，游客也可直接访问。
+    navLink("排行榜", "/leaderboard"),
+  ]);
   // 提交历史需登录；游客不显示会跳转登录的入口。
   if (isLoggedIn()) {
     links.appendChild(navLink("提交历史", "/submissions"));

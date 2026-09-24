@@ -31,8 +31,9 @@
 - [x] M4.2 题目列表（`GET /api/problems` 搜索/难度/标签/可见性组合筛选 + 每页 20 条分页与紧凑页码范围 + 通过人数与本人 AC 状态 + 管理员隐藏题目标识与「全部/公开/隐藏」筛选 + 标签选项 `GET /api/problem-tags` + 查询条件承载于 hash 路由；功能已实现，待独立测试验证）
 - [x] M4.3 题目与做题页面（左题面/样例/限制/本人状态 + CDN CodeMirror 编辑器与 C/C++ 高亮、语言切换、`Ctrl+Enter` 提交 + 提交中/成功/失败状态与源码快照 + 全部逐点结果（状态/耗时/内存/原因）+ WA 输入/期望/实际输出 + 编译与诊断信息；已通过独立测试验证：后端 59 项断言 + 单元 4 用例、jsdom 54 项、真实 Chromium 28 项（含真实 CDN CodeMirror 高亮、ResizeObserver/refresh、窄视口单列、编辑器释放）、c8 前端覆盖率；全量回归 41/41。见 `tests/M4.3-test-report.md`）
 - [x] M4.4 提交历史与详情（`GET /api/submissions?mine` 本人历史分页（最新优先、可选题目筛选）+ `GET /api/submissions/{id}` 详情（本人/管理员）+ `GET /api/status` 本人题目状态；前端 `#/submissions`、`#/submissions/{id}` 与导航入口，复用 M4.3 结果组件，只读源码、管理员就地重判；已通过独立测试验证：后端单元 7 用例 + 集成 90 项断言、jsdom 31 项，全量回归 43/43，旧前端回归 313/313。见 `tests/M4.4-test-report.md`）
+- [x] M4.5 排行榜（`GET /api/leaderboard` 公开分页查询 + 前端 `#/leaderboard` 与导航入口：按 AC 数↓/总提交次数↑/首次 AC 时间↑/注册时间↑/用户 ID↑ 排序；统计复用既有 `user_problem_status` 持久化数据，仅计入可见题目与有已结算提交的用户，管理员同口径参与；已通过独立测试验证：后端单元 9 用例 + 集成 4 场景/52 项断言、jsdom 23 项，全量常规回归 45/45。见 `tests/M4.5-test-report.md`）
 
-后续阶段（排行榜页面）尚未实现。
+M4.5 排行榜（统计、排序、接口与页面）已通过独立测试验证。M5 安全回归与 M6 测试交付尚未完成。
 
 ## 环境要求
 
@@ -530,15 +531,15 @@ OJ_JWT_SECRET="$(openssl rand -hex 32)" OJ_ADMIN_PASSWORD='请改为强密码' \
 `web/js/storage.js`（登录后返回目标）、`web/js/nav.js`（导航）。
 
 - **路由接入与访问条件**：全部已实现页面接入同一 hash 路由表——`#/problems`、
-  `#/problems/{id}`、`#/submissions`、`#/submissions/{id}`、`#/login`、`#/register`、
-  `#/password`、`#/admin`、`#/admin/problems`、`#/admin/problems/new`、
-  `#/admin/problems/{id}/edit`、`#/admin/problems/{id}/testcases`、`#/admin/users`、
-  `#/admin/rejudge`（已保留 Rejudge 入口）。路由以 `access`（`public`/`auth`/`admin`）声明
-  访问条件，由 `router.js` 统一判定，页面不再各自分散判断。默认空 hash → `#/problems`；
-  未知路由显示「页面不存在」；非法路由参数/编码异常显示「地址参数无效」；直接打开带 hash
-  的地址、刷新与前进后退均走同一套规则。提交历史页（M4.4）已在后续阶段接入导航与路由
-  （见「提交历史与详情页（M4.4）」）；排行榜（M4.5）尚未实现，导航与页脚不提供会进入
-  空白页的入口。
+  `#/problems/{id}`、`#/leaderboard`、`#/submissions`、`#/submissions/{id}`、
+  `#/login`、`#/register`、`#/password`、`#/admin`、`#/admin/problems`、
+  `#/admin/problems/new`、`#/admin/problems/{id}/edit`、
+  `#/admin/problems/{id}/testcases`、`#/admin/users`、`#/admin/rejudge`（已保留 Rejudge
+  入口）。路由以 `access`（`public`/`auth`/`admin`）声明访问条件，由 `router.js` 统一判定，
+  页面不再各自分散判断。默认空 hash → `#/problems`；未知路由显示「页面不存在」；非法路由
+  参数/编码异常显示「地址参数无效」；直接打开带 hash 的地址、刷新与前进后退均走同一套规则。
+  提交历史页（M4.4）与排行榜页（M4.5）已在后续阶段接入导航与路由（见「提交历史与详情页
+  （M4.4）」「排行榜页（M4.5）」）；导航与页脚随对应页面实现提供入口。
 - **身份状态**：`auth.js` 区分 `unknown`（有 token 待核实）、`guest`、`authenticated`
   三种状态。恢复会话时由 `session.js` 通过 `GET /api/me` 核实当前用户，**后台访问
   权限依据服务端最新角色与 `reset_pwd_flag`，不凭本地保存的角色**；核实前导航不显示
@@ -711,6 +712,33 @@ OJ_JWT_SECRET="$(openssl rand -hex 32)" OJ_ADMIN_PASSWORD='请改为强密码' \
 > `tests/frontend/m44_history_dom.mjs` + `run_m44.sh`（jsdom，31 项）；全量常规回归
 > `ctest --parallel 1` 43/43，旧前端回归 M4.1 78/78 + 53/53、M2.5 128/128、M4.3 54/54。
 > 完整逐项结果见 `tests/M4.4-test-report.md`。
+
+### 排行榜页（M4.5）
+
+新增公开排行榜页 `#/leaderboard`，游客与登录用户均可访问，并接入顶部导航。页面实现
+位于 `web/js/pages/leaderboard.js`，复用 M4.1 的路由/身份/错误处理/生命周期，未引入
+构建流程或前端框架。统计与排序由后端完成，前端只负责一致展示，不根据单次提交结果
+自行加减排名。
+
+- **展示列**：名次（后端返回的全局名次，不在各页从 1 重置）、昵称、AC 题目数、总提交
+  次数与首次 AC 时间。没有 AC 的用户首次 AC 时间显示「—」，不显示无意义日期；昵称等
+  文本一律经 `textContent` 纯文本渲染。
+- **分页**：使用后端 `page`/`page_size`（固定 20）/`total`/`total_pages`，展示当前页
+  与总人数，提供上一页/下一页与紧凑页码范围；页码承载于 `#/leaderboard?page=`，刷新与
+  前进后退可恢复，超出末页自动修正并重取，不在前端对当前页二次排序或分页。
+- **状态**：提供加载中、无数据（暂无可展示排名）与请求失败（提供重试）状态；「刷新」
+  按钮主动重新获取当前排名。进入页面或主动刷新时获取，不新增高频轮询或实时推送。
+- **当前用户高亮**：仅当已登录且响应中 `user_id` 与当前身份可靠匹配时高亮该行，**不通过
+  昵称猜测身份**；登录/退出或切换账号后按最新身份重绘高亮，退出登录不残留过时的个人状态。
+- **旧响应处理**：读取请求可被取消或按代次丢弃，快速翻页或离开页面时旧响应不会覆盖
+  当前页面。
+- **范围**：不实现竞赛榜、积分系统、时间段榜单、奖章或批量重算平台，不改变已确认的
+  提交计数、Rejudge 与崩溃恢复规则。
+
+> **已通过独立测试验证**：后端单元 `tests/unit/test_m45_leaderboard_unit.cpp`（9 用例）
+> 与集成 `tests/integration/test_m45_leaderboard_api.cpp`（4 场景 / 52 项断言）、页面级
+> `tests/frontend/m45_leaderboard_dom.mjs` + `run_m45.sh`（jsdom，23 项）；全量常规回归
+> `ctest --parallel 1` 45/45 通过。完整逐项结果见 `tests/M4.5-test-report.md`。
 
 ### 注册接口
 
@@ -1582,6 +1610,48 @@ curl -i 'http://127.0.0.1:8080/api/status?problem_id=1' \
 - 范围依据已确认的历史访问规则：状态属用户自身数据，本人对已提交题目的状态不因题目
   后来隐藏而收回；本接口不返回题目标题/题面等隐藏题目资料。
 - 非法 `problem_id` `400`；未登录 / 无效 token `401`；内部故障 `500`。
+
+### 排行榜接口（M4.5）
+
+`GET /api/leaderboard`（公开，无需登录），返回分页排行榜。支持可选参数 `page`
+（默认 1，正整数 `1..1000000`，非法 `400`），每页固定 20 条。
+
+```bash
+curl -i 'http://127.0.0.1:8080/api/leaderboard?page=1'
+```
+
+成功响应（`200`）：
+
+```json
+{"leaderboard":[
+   {"rank":1,"user_id":2,"nickname":"alice","ac_count":5,"submit_count":8,
+    "first_ac_at":"2026-09-21 12:00:00","created_at":"2026-09-20 09:00:00"},
+   {"rank":2,"user_id":3,"nickname":"bob","ac_count":0,"submit_count":2,
+    "first_ac_at":null,"created_at":"2026-09-20 09:05:00"}],
+ "page":1,"page_size":20,"total":2,"total_pages":1}
+```
+
+- **排名对象（本次确定）**：仅统计至少有 1 次已结算提交的用户，从未提交的用户不出现；
+  管理员按普通用户口径参与排名（与「管理员也可做题」一致）；隐藏题目
+  （`problems.visible=0`）的 AC 与提交均**不计入**公开榜。未接收请求与未结算在途
+  任务不参与统计。
+- **统计来源**：复用既有持久化状态 `user_problem_status`（`status`、`first_ac_at`、
+  `submit_count`）与 `users.created_at`，不为排行榜重复存储整套统计。AC 数按 accepted
+  的**不同题目**计数（重复 AC 不重复增加）；总提交次数为该用户可见题目的
+  `submit_count` 合计，沿用既有结算规则（含失败提交，Rejudge 不增加）；首次 AC 时间
+  取当前仍有效 accepted 题目中最早的 `first_ac_at`，无 AC 为 `null`（不用注册时间/
+  当前时间/0 伪造）。
+- **排序**：AC 数降序 → 总提交次数升序 → 首次 AC 时间升序 → 注册时间升序 →
+  用户 ID 升序（稳定的最终排序键）。首次 AC 时间为 `null` 的用户排在有值者之后
+  （显式判定，不依赖数据库默认行为）；无 AC 用户之间继续按规定比较提交次数、注册时间
+  与 ID。分页在全局排序后进行，`rank` 为全局名次，不按页从 1 重置。
+- **只读与一致性**：读取不修改记录、不重新判题、不触发补计数；使用短只读事务，使
+  `total` 与当前页来自同一数据视图，不长期持有覆盖判题执行的事务。每个用户行来自
+  单个 GROUP BY 聚合子查询后再与 `users` 一对一连结，避免多表连接放大统计；全部
+  参数绑定，沿用既有索引。
+- **字段范围**：只返回名次、昵称、AC 数、总提交次数、首次 AC 时间与注册时间，以及供
+  前端可靠高亮当前用户的 `user_id`；**不返回账号、密码哈希、token、源码或逐点结果**。
+- 非法 `page` `400`；内部故障 `500`。
 
 ### 判题任务调度（M3.1）
 

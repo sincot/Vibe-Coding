@@ -8,6 +8,7 @@ import {
 import { subscribeAuth } from "./auth.js";
 import { ensureAuth, resetSessionVerification } from "./session.js";
 import { renderNav } from "./nav.js";
+import { renderLeaderboard } from "./pages/leaderboard.js";
 import { renderProblem } from "./pages/problem.js";
 import { renderProblems } from "./pages/problems.js";
 import { renderSubmissionDetail } from "./pages/submission-detail.js";
@@ -58,6 +59,9 @@ addRoute("/login", renderLogin, { access: "public" });
 addRoute("/password", renderPassword, { access: "auth", allowDuringPasswordChange: true });
 addRoute("/problems", renderProblems, { access: "public" });
 addRoute("/problems/:id", renderProblem, { access: "public" });
+
+// 排行榜（M4.5）：公开页面，游客可直接访问；后端只返回聚合后的公开字段。
+addRoute("/leaderboard", renderLeaderboard, { access: "public" });
 
 // 本人提交历史与提交详情（M4.4）：需登录；详情接口在后台再按本人/管理员权限
 // 二次校验，前端检查只用于页面体验。
