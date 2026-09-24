@@ -15,6 +15,9 @@
 #       数据包含且不动 -wal/-shm；错误路径（源库缺失/目录/非库/空库/非法参数/
 #       非法环境/不可写目录/磁盘不足/并发锁）；同日替换与 --no-replace；含空格路径
 #       与脱离 cwd；时区；清理边界；忽略规则；文档与勾选。
+# 复审补充（T-041~T-049）：OJ_DB/OJ_BACKUP_DIR 环境变量与命令行优先级、--database 别名、
+#       OJ_BACKUP_NO_REPLACE/OJ_BACKUP_SKIP_SPACE_CHECK 环境变量、数值配置边界与十进制解析、
+#       源库不可读、缺少 flock 依赖、日志不泄露敏感内容、服务打开恢复库的幂等初始化。
 # =============================================================================
 set -uo pipefail
 
@@ -470,6 +473,13 @@ if [[ "$recov_up" == "1" ]]; then
   check_eq "T-038 启动恢复重新入队并结算（在途清空且提交 +1）" "1" "$settled"
   recov_status="$(sqlite3 --readonly "$RECOV_DB" "SELECT status FROM submissions WHERE instr(source_code,'M62_INFLIGHT_SRC')>0 ORDER BY id DESC LIMIT 1;" 2>/dev/null)"
   check_true "T-038 结算结果为确定终态（实际=${recov_status:-无}）" bash -c "echo '$recov_status' | grep -Eq '^(AC|WA|CE|TLE|RE|MLE|SYSERR)$'"
+  # T-049 服务打开恢复库后的幂等初始化：重启用 WAL、既有数据保留、admin 不重复创建
+  check_eq "T-049 服务打开恢复库后重新启用 WAL" "wal" \
+    "$(sqlite3 --readonly "$RECOV_DB" 'PRAGMA journal_mode;')"
+  check_eq "T-049 既有用户数据未被重置" "m62_user" \
+    "$(sqlite3 --readonly "$RECOV_DB" "SELECT nickname FROM users WHERE id=4242;")"
+  check_eq "T-049 管理员未被重复创建" "1" \
+    "$(sqlite3 --readonly "$RECOV_DB" "SELECT count(*) FROM users WHERE account='admin';")"
 fi
 kill "$SERVER_PID" 2>/dev/null || true
 wait "$SERVER_PID" 2>/dev/null || true
@@ -506,6 +516,84 @@ run_sut OJ_BACKUP_TZ='Etc/GMT-14' bash "$SUT" --db "$SRC_DB" --out-dir "$TZ_DIR"
 check_eq "T-028 指定时区备份退出码 0" "0" "$last_rc"
 check_true "T-028 文件名使用指定时区日期" test -f "$TZ_DIR/oj-$EXP_TZ_DATE.sql"
 check_match "T-028 日志打印指定时区偏移" '\+1400' "$(cat "$OUT")"
+
+# ---------------------------------------------------------------------------
+# 补充：环境变量配置、参数别名、配置边界、依赖缺失与日志安全
+# ---------------------------------------------------------------------------
+# T-041 环境变量驱动 OJ_DB / OJ_BACKUP_DIR，以及命令行优先级
+ENV_BK="$TMP/env-backup"; mkdir -p "$ENV_BK"
+run_sut OJ_DB="$SRC_DB" OJ_BACKUP_DIR="$ENV_BK" OJ_BACKUP_TZ=UTC bash "$SUT"
+check_eq "T-041 OJ_DB+OJ_BACKUP_DIR 退出码 0" "0" "$last_rc"
+check_true "T-041 备份生成于 OJ_BACKUP_DIR" test -f "$ENV_BK/oj-$EXPECT_DATE.sql"
+
+ENV_BK2="$TMP/env-backup2"; mkdir -p "$ENV_BK2"
+run_sut OJ_DB="$TMP/definitely-missing.db" OJ_BACKUP_DIR="$TMP/never-used" OJ_BACKUP_TZ=UTC \
+  bash "$SUT" --db "$SRC_DB" --out-dir "$ENV_BK2"
+check_eq "T-041 命令行覆盖环境变量退出码 0" "0" "$last_rc"
+check_true "T-041 输出到命令行 --out-dir" test -f "$ENV_BK2/oj-$EXPECT_DATE.sql"
+check_true "T-041 未落到环境变量目录" test ! -e "$TMP/never-used/oj-$EXPECT_DATE.sql"
+
+# T-042 --database 参数别名
+run_sut bash "$SUT" --database "$SRC_DB" --out-dir "$TMP/alias-bk"
+check_eq "T-042 --database 别名退出码 0" "0" "$last_rc"
+check_true "T-042 --database 生成备份" bash -c "ls '$TMP/alias-bk'/oj-*.sql 2>/dev/null | grep -q ."
+
+# T-043 OJ_BACKUP_NO_REPLACE 环境变量
+NR_DIR="$TMP/noreplace-env"; mkdir -p "$NR_DIR"
+run_sut OJ_BACKUP_TZ=UTC bash "$SUT" --db "$SRC_DB" --out-dir "$NR_DIR"
+NR_FILE="$NR_DIR/oj-$EXPECT_DATE.sql"
+NR_H="$(sha256sum "$NR_FILE" | awk '{print $1}')"
+run_sut OJ_BACKUP_NO_REPLACE=1 OJ_BACKUP_TZ=UTC bash "$SUT" --db "$SRC_DB" --out-dir "$NR_DIR"
+check_eq "T-043 env no-replace 退出码 0" "0" "$last_rc"
+check_eq "T-043 env no-replace 内容不变" "$NR_H" "$(sha256sum "$NR_FILE" | awk '{print $1}')"
+check_contains "T-043 env no-replace 提示跳过" "$OUT" "跳过"
+
+# T-044 OJ_BACKUP_SKIP_SPACE_CHECK=1 跳过磁盘预检（对照 T-022 的失败路径）
+SKIP_BK="$TMP/skipspace"; mkdir -p "$SKIP_BK"
+run_sut PATH="$STUB:$PATH" OJ_BACKUP_SKIP_SPACE_CHECK=1 OJ_BACKUP_TZ=UTC bash "$SUT" --db "$SRC_DB" --out-dir "$SKIP_BK"
+check_eq "T-044 跳过空间预检退出码 0" "0" "$last_rc"
+check_true "T-044 跳过空间预检仍生成备份" test -f "$SKIP_BK/oj-$EXPECT_DATE.sql"
+
+# T-045 数值配置边界：零值/非数字拒绝，前导零按十进制解析
+run_sut OJ_BACKUP_BUSY_TIMEOUT_MS=0 bash "$SUT" --db "$SRC_DB" --out-dir "$TMP/e45a"
+check_eq "T-045 BUSY_TIMEOUT_MS=0 退出码 2" "2" "$last_rc"
+run_sut OJ_BACKUP_LOCK_WAIT=abc bash "$SUT" --db "$SRC_DB" --out-dir "$TMP/e45b"
+check_eq "T-045 LOCK_WAIT 非数字退出码 2" "2" "$last_rc"
+run_sut OJ_BACKUP_TIMEOUT=0 bash "$SUT" --db "$SRC_DB" --out-dir "$TMP/e45c"
+check_eq "T-045 TIMEOUT=0 退出码 2" "2" "$last_rc"
+run_sut OJ_BACKUP_BUSY_TIMEOUT_MS=0500 OJ_BACKUP_TZ=UTC bash "$SUT" --db "$SRC_DB" --out-dir "$TMP/e45d"
+check_eq "T-045 前导零按十进制（0500）退出码 0" "0" "$last_rc"
+
+# T-046 源库不可读（仅非 root 有效）
+if [[ "$(id -u)" -ne 0 ]]; then
+  UNREAD="$TMP/unreadable.db"; printf 'not readable\n' >"$UNREAD"; chmod 000 "$UNREAD"
+  run_sut bash "$SUT" --db "$UNREAD" --out-dir "$TMP/e46"
+  check_eq "T-046 源库不可读退出码 2" "2" "$last_rc"
+  check_contains "T-046 不可读提示明确" "$ERR" "不可读"
+  chmod 600 "$UNREAD"
+else
+  printf '  [SKIP] T-046 源库不可读（以 root 运行，权限检查不适用）\n'
+fi
+
+# T-047 缺少必要依赖（flock）时明确失败
+STUB_NODEP="$TMP/stub-nodep"; mkdir -p "$STUB_NODEP"
+for t in bash dirname basename stat mktemp sqlite3 timeout awk date; do
+  p="$(command -v "$t" 2>/dev/null || true)"
+  [[ -n "$p" ]] && ln -sf "$p" "$STUB_NODEP/$t"
+done
+run_sut PATH="$STUB_NODEP" /bin/bash "$SUT" --db "$SRC_DB" --out-dir "$TMP/e47"
+check_eq "T-047 缺少 flock 退出码 2" "2" "$last_rc"
+check_contains "T-047 缺少依赖提示明确" "$ERR" "缺少必要依赖"
+check_contains "T-047 明确指出 flock" "$ERR" "flock"
+
+# T-048 备份日志不泄露敏感内容（源码/逐点结果/密码哈希标记）
+LEAK_BK="$TMP/leak"; mkdir -p "$LEAK_BK"
+run_sut bash "$SUT" --db "$SRC_DB" --out-dir "$LEAK_BK"
+check_eq "T-048 备份退出码 0（准备）" "0" "$last_rc"
+check_not_contains "T-048 stdout 不泄露提交源码" "$OUT" "M62_MARKER_SRC"
+check_not_contains "T-048 stdout 不泄露逐点结果" "$OUT" "M62_MARKER_PER_CASE"
+check_not_contains "T-048 stdout 不泄露密码哈希" "$OUT" "NOT_A_REAL_HASH"
+check_not_contains "T-048 stderr 不泄露提交源码" "$ERR" "M62_MARKER_SRC"
 
 # ---------------------------------------------------------------------------
 # 忽略规则与文档

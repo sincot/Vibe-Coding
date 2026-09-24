@@ -35,21 +35,195 @@
 
 M4.5 排行榜已通过独立测试验证；M5 安全与异常回归、M6.1 自动化测试、M6.2 备份与恢复
 均已完成并通过相应回归（M6.2 备份可在隔离库恢复并核对通过，见 `tests/M6.2-test-report.md`）。
-M6.3 部署文档与 M6.4 最终验收未完成。
+M6.3 部署文档（依赖说明、部署/启动流程、配置表、数据位置、故障排查）与一键启动入口
+已整理完成；**实际部署步骤尚未执行验证**，M6.4 最终验收未完成。见「部署（Linux，M6.3）」。
 
 ## 环境要求
 
-Ubuntu 22.04 LTS，安装依赖：
+目标环境：**Ubuntu 22.04 LTS（Jammy）x86_64，内核 5.15 系列**。项目只在
+该环境验证过，未声称支持所有 Linux 发行版。安装依赖：
 
 ```bash
 sudo apt update
 sudo apt install -y build-essential cmake libcpp-httplib-dev nlohmann-json3-dev \
-  libsqlite3-dev libargon2-dev libssl-dev libgtest-dev
+  libsqlite3-dev libargon2-dev libssl-dev
 ```
 
-> 完整依赖清单（seccomp、jwt-cpp、tmpfs 挂载等后续阶段使用）见 `dependence.md`。
-> M1.2 起需要 jwt-cpp（header-only）与 libssl（JWT HS256 所用 libcrypto），
-> jwt-cpp 安装方式见 `dependence.md` 3.6 节。
+- 构建/运行必需依赖如上；`sqlite3`（备份脚本）、`libgtest-dev`（单元测试）、
+  `cron`（定时备份）、`curl`/`python3`（冒烟回归）等按需安装，均非服务运行必需。
+- 判题沙箱为**手写 seccomp-bpf + Linux 命名空间**，**不使用 `libseccomp`**，
+  故 `libseccomp-dev` 当前非必需。
+- `jwt-cpp` 为 header-only，需源码安装到 `/usr/local/include`，见 `dependence.md` 3.5 节。
+- 完整分类（构建依赖 / 运行依赖 / 可选测试依赖 / 来源 / 版本 / 内核能力 / 资源约束）
+  见 [`dependence.md`](dependence.md)。
+
+## 部署（Linux，M6.3）
+
+> 本节按实际操作顺序整理在 Linux 上的部署流程，并给出配置、数据、备份与故障处理入口。
+> **状态**：部署文档、一键启动入口与静态一致性检查已整理；**本轮未实际执行安装、构建、
+> 启动、挂载、迁移或备份恢复，实际部署步骤待后续独立任务在目标服务器逐项验证。**
+
+### 1. 准备环境
+
+- 目标：Ubuntu 22.04 LTS x86_64，内核 5.15 系列；服务与判题**不以 root 运行**。
+- 运行前检查资源（内存约 3.3 GiB、历史环境**无 Swap**）：
+
+  ```bash
+  grep PRETTY_NAME /etc/os-release   # Ubuntu 22.04 LTS
+  uname -r                           # 5.15.0-*
+  nproc                              # CPU 核数（决定判题 worker 数）
+  free -h                            # 运行前重新确认可用内存
+  swapon --show || echo "无 swap"
+  ```
+
+- 沙箱所需内核能力检查（非特权用户命名空间、seccomp-bpf、tmpfs）见
+  `dependence.md` 1.2 节。任一能力缺失时服务会拒绝启动，**不要关闭隔离来绕过**。
+
+### 2. 获取项目
+
+```bash
+git clone <仓库地址> Vibe-Coding
+cd Vibe-Coding
+```
+
+- `<仓库地址>` 为占位符，请替换为实际 Git 地址。
+- 确认目录含 `CMakeLists.txt`、`src/`、`web/`、`scripts/`、`data/.gitkeep`。
+
+### 3. 安装依赖
+
+按 [`dependence.md`](dependence.md) 第 3 节安装。正式部署最小集合：
+
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake libcpp-httplib-dev nlohmann-json3-dev \
+  libsqlite3-dev libargon2-dev libssl-dev
+
+# jwt-cpp（header-only，源码安装；详见 dependence.md 3.5）
+cd /tmp && git clone https://github.com/Thalhammer/jwt-cpp.git \
+  && sudo cp -r jwt-cpp/include/jwt-cpp /usr/local/include/ && rm -rf jwt-cpp
+```
+
+- 备份需 `sqlite3`；定时备份需 `cron`（见 3.7 与「备份与恢复（M6.2）」）。
+- 跑测试/回归再装 `libgtest-dev`、`curl`、`python3`。
+
+### 4. 准备必要目录与权限
+
+| 路径 | 用途 | 权限/属主 | 持久性 |
+|---|---|---|---|
+| `<项目>/data/` | `oj.db` 及 `oj.db-wal`/`oj.db-shm`/`oj.db.lock` | 服务账号可读写 | **持久化**（WAL/SHM/lock 为运行辅助） |
+| `<项目>/backup/` | `scripts/backup.sh` 输出 `oj-YYYYMMDD.sql` | 服务账号可读写，文件 0600 | **持久化**（外部备份） |
+| `/opt/oj-tmpfs` | 判题一次性工作目录根 | root 挂载，`mode=1777` | **临时**（tmpfs，重启消失） |
+| `<项目>/build/` | 构建产物 | 可重建 | 临时 |
+| `build/regression-logs/` | 冒烟回归服务日志 | 可重建 | 临时 |
+
+```bash
+mkdir -p data backup
+# 挂载判题 tmpfs（正式部署必需；可写入 /etc/fstab 开机自动挂载）
+sudo mkdir -p /opt/oj-tmpfs
+sudo mount -t tmpfs -o size=512M,mode=1777 tmpfs /opt/oj-tmpfs
+```
+
+- 不挂载 tmpfs 时服务启动即失败（退出码 1）。无挂载权限的开发环境可显式
+  `OJ_JUDGE_ALLOW_NON_TMPFS=1`（显著告警，仅开发/测试）。
+
+### 5. 配置密钥与初始管理员密码
+
+```bash
+# JWT 签名密钥：必需，长度 ≥ 16 字节；用强随机值，勿用示例值
+export OJ_JWT_SECRET="$(openssl rand -hex 32)"
+# 初始管理员密码：仅“首次初始化且库中尚无 admin”时需要；占位符须替换为真实强口令
+export OJ_ADMIN_PASSWORD='<首次初始化时设置的强密码>'
+```
+
+- 密钥与密码只从环境变量读取，**不写入源码、版本控制或日志**；真实配置勿放进 `web/`。
+- 服务环境变量可用 systemd `Environment=`/`EnvironmentFile=` 提供（本轮不新增 unit）。
+
+### 6. 构建
+
+```bash
+cmake -S . -B build
+cmake --build build --parallel 1
+```
+
+生成 `build/oj_server`。**固定单并发** `--parallel 1`；**不要**使用无数量的 `-j`
+或 `-j$(nproc)`（本项目目标机内存小，会耗尽内存甚至断连），详见「构建」一节。
+
+### 7. 首次初始化与种子数据
+
+- **首次初始化**（库中尚无 `admin`）：启动时自动创建 `data/`、`oj.db` 与表结构，
+  并预置管理员 `admin`（`reset_pwd_flag=1`，首次登录强制改密）；此步骤需要
+  `OJ_ADMIN_PASSWORD`，否则启动报错退出。
+- **已有数据库**：正常重启**不会**重置管理员密码/角色、不会重复创建 admin、
+  不会清空数据，也**不会**自动导入种子题。
+- 种子题（3 道）仅在**显式** `--seed` 时导入，且幂等：
+
+  ```bash
+  ./build/oj_server --db data/oj.db --seed
+  ```
+
+### 8. 启动（一键入口）
+
+优先复用已有入口 `scripts/run_dev_server.sh`：
+
+```bash
+OJ_JWT_SECRET="$(openssl rand -hex 32)" OJ_ADMIN_PASSWORD='<强密码>' \
+  bash scripts/run_dev_server.sh
+```
+
+- 脚本会定位项目与 `build/oj_server`、读取 `OJ_DB`/`OJ_HOST`/`OJ_PORT`/`OJ_WEB`、
+  检查必要前置条件（可执行文件、密钥、首次初始化密码）、优先选择可用的 tmpfs
+  判题目录（`/opt/oj-tmpfs` → `/dev/shm`），然后 `exec` 启动服务，**正确透传停止
+  信号与退出码**。
+- 它**不会**自动安装依赖、修改系统配置、挂载文件系统、重置密码或恢复数据库；
+  缺少必要前置条件（可执行文件、JWT 密钥、首次初始化密码）时以非零码清晰退出。
+- **安全边界**：若既无 `/opt/oj-tmpfs` 也无 `/dev/shm`，脚本会**显式告警**并仅作为
+  **开发例外**回退到非 tmpfs；正式部署必须先按第 4 步挂载 tmpfs（脚本会直接使用），
+  或改用手动命令显式指定 `OJ_JUDGE_WORKSPACE`。**不要**用 `OJ_JUDGE_ALLOW_NON_TMPFS`
+  在正式环境掩盖缺少 tmpfs 的问题。
+- 默认监听 `0.0.0.0:8080`。也可手动启动：
+
+  ```bash
+  OJ_JWT_SECRET="$OJ_JWT_SECRET" OJ_ADMIN_PASSWORD="$OJ_ADMIN_PASSWORD" \
+    ./build/oj_server --host 0.0.0.0 --port 8080 --db data/oj.db --web web
+  ```
+
+- 启动自检：
+
+  ```bash
+  curl -sS --max-time 5 http://127.0.0.1:8080/api/health   # 期望 {"status":"ok"}
+  ```
+
+### 9. 访问：本机与远程（含 Windows 端口转发）
+
+- 本机访问：`http://127.0.0.1:<端口>/`（默认 `8080`）。
+- 远程服务器：直接浏览器访问需使用服务器真实地址且防火墙/安全组放行端口；
+  否则用 SSH 端口转发。
+- **Windows + VS Code Remote-SSH**：在 VS Code「端口 / PORTS」面板转发 `8080`，
+  再点击「在浏览器中打开」，使用面板给出的**实际本地地址**（通常是
+  `http://localhost:<VS Code 分配的本地端口>`）。
+- **不要默认 Windows 的 `127.0.0.1:8080` 就是云服务器的 `8080`**：未在转发面板
+  暴露/未做端口转发时，Windows 本机该端口并无监听。页面空白或一直加载通常表示
+  服务未启动或启动失败（见「故障排查」），而非浏览器问题。
+
+### 10. 正常停止与再次启动
+
+- 前台运行按 `Ctrl+C`（或 `SIGTERM`）优雅停止，见「停止服务」。
+- 停止后确认无残留：`pgrep -a oj_server`；再次执行第 8 步即可重启，已有数据不重置。
+
+### 11. 管理员与账号安全要点
+
+- 默认管理员账号为 **`admin`**；初始密码由 `OJ_ADMIN_PASSWORD` 提供，不写死、
+  不在文档或日志中出现。首次登录 `reset_pwd_flag=1`，**必须改密**后才能使用管理功能。
+- 已有管理员**不会**因正常重启被重置；`--seed` 也不涉及 admin。
+- 重置密码/改角色后旧 JWT 仍有效至 `exp`（**无会话撤销机制**），但每次鉴权按数据库
+  最新角色与首改标记判定，权限变化实时生效；退出登录只清理前端凭证，不撤销后端 token。
+- 真实密钥与口令不进入版本控制、日志或静态托管目录（`web/`）。
+
+### 12. 其它入口
+
+- 配置项明细见「配置方式」；数据位置见「数据位置与持久化」。
+- 备份/恢复见「备份与恢复（M6.2）」；cron 需单独配置，本轮不安装。
+- 故障处理见「故障排查」。
 
 ## 构建
 
@@ -387,29 +561,33 @@ bash tests/coverage/run_coverage.sh          # 配置→单并发构建→串行
 
 ### 配置方式
 
-命令行参数与环境变量，均可省略：
+命令行参数与环境变量。下表来自实际代码（`src/config.{h,cpp}`、`src/auth/jwt.cpp`）：
 
-| 参数 | 默认值 | 说明 |
-|---|---|---|
-| `--host` | `0.0.0.0` | 监听地址 |
-| `--port` | `8080` | 监听端口（1-65535 的整数） |
-| `--db` | `data/oj.db` | SQLite 数据库路径 |
-| `--web` | `web` | 前端静态资源目录；仅该目录对外只读托管（M1.7） |
-| `--seed` | 关闭 | 仅导入内置种子题目后退出，不启动服务（幂等，详见「种子数据导入」） |
-| `OJ_ADMIN_PASSWORD` | （无） | 首次初始化（尚无 admin）时预置的管理员初始密码 |
-| `OJ_JWT_SECRET` | （无，必需） | JWT HS256 签名密钥，长度不少于 16 字节，无默认值 |
-| `OJ_JWT_EXPIRES_SECONDS` | `3600` | JWT 有效期（秒），须为 1..31536000 的整数 |
-| `OJ_JUDGE_QUEUE_CAPACITY` | `32` | 判题等待队列容量（等待执行的任务数，非正在执行数），须为 1..256 的整数（M3.1） |
-| `OJ_JUDGE_WORKSPACE` | `/opt/oj-tmpfs` | 判题工作目录根（应为 tmpfs，详见 `dependence.md` 3.9 节）（M3.3） |
-| `OJ_JUDGE_ALLOW_NON_TMPFS` | 未设置 | 取 `1/true/yes` 时允许工作目录非 tmpfs（仅开发/测试，会显著告警）（M3.3） |
-| `OJ_JUDGE_COMPILE_CONCURRENCY` | `2` | 编译阶段并发门限（1..64），运行阶段并发仍为 `min(CPU 核数, 8)`（M3.3） |
+| 配置名称 | 用途 | 默认值 | 必填条件 | 取值范围 | 敏感性 |
+|---|---|---|---|---|---|
+| `--host` | HTTP 监听地址 | `0.0.0.0` | 可选 | 非空字符串 | 低（暴露面相关） |
+| `--port` | HTTP 监听端口 | `8080` | 可选 | 整数 `1..65535` | 低 |
+| `--db` | SQLite 数据库路径 | `data/oj.db` | 可选 | 非空路径 | 中（数据） |
+| `--web` | 前端静态资源目录（仅该目录对外只读托管） | `web` | 可选 | 非空目录 | 中（勿指向项目根/敏感目录） |
+| `--seed` | 仅导入内置种子题后退出，不启动服务（幂等） | 关闭 | 可选 | 布尔开关 | 低 |
+| `OJ_ADMIN_PASSWORD` | 首次初始化（尚无 `admin`）时预置管理员初始密码 | 无 | **首次初始化时必需**；已有 admin 可省略 | 非空字符串 | **高**（口令，勿记录/入库明文） |
+| `OJ_JWT_SECRET` | JWT HS256 签名密钥 | 无 | **必需** | ≥ 16 字节 | **高**（泄露可伪造 token） |
+| `OJ_JWT_EXPIRES_SECONDS` | JWT 有效期 | `3600` | 可选 | 整数 `1..31536000` | 低 |
+| `OJ_JUDGE_QUEUE_CAPACITY` | 判题等待队列容量（等待执行的任务数，非正在执行数） | `32` | 可选 | 整数 `1..256` | 低 |
+| `OJ_JUDGE_WORKSPACE` | 判题工作目录根（应为 tmpfs） | `/opt/oj-tmpfs` | 可选 | 可写目录路径 | 中（隔离） |
+| `OJ_JUDGE_ALLOW_NON_TMPFS` | 允许工作目录非 tmpfs（仅开发/测试，显著告警） | 未设置 | 可选 | `1/true/yes` 或 `0/false/no` | 中（降低隔离，正式部署勿设） |
+| `OJ_JUDGE_COMPILE_CONCURRENCY` | 编译阶段并发门限（运行阶段并发仍为 `min(CPU 核数, 8)`） | `2` | 可选 | 整数 `1..64` | 低 |
 
-非法输入（如 `--port abc`、`--port 0`、未知参数、`OJ_JUDGE_QUEUE_CAPACITY=0`）会打印
-错误信息并以非零返回码退出；端口被占用或地址不可用时同样报错并以非零返回码退出。
+- 备份脚本另有独立配置（`OJ_DB`/`OJ_BACKUP_DIR`/`OJ_BACKUP_TZ` 等），见「备份与恢复（M6.2）」。
+- 上表仅列实际存在的配置，不包含未实现的参数。示例中的值均为**占位符**，不能直接
+  当作安全生产配置；真实密钥/口令只放环境变量。
+- 非法输入（如 `--port abc`、`--port 0`、未知参数、`OJ_JUDGE_QUEUE_CAPACITY=0`、
+  `OJ_JUDGE_COMPILE_CONCURRENCY=0`、缺失或过短的 `OJ_JWT_SECRET`）会打印错误信息并
+  以非零返回码退出；端口被占用或地址不可用时同样报错退出。
 
 ### 数据库与初始管理员
 
-- 首次启动自动创建数据目录、`oj.db` 及五张业务表，并预置管理员 `admin`（角色 `admin`，`reset_pwd_flag=1`，首次登录强制改密）。
+- 首次启动自动创建数据目录、`oj.db` 及六张业务表（`users`/`problems`/`testcases`/`submissions`/`user_problem_status`，以及 M3.7 的 `in_flight_tasks`），并预置管理员 `admin`（角色 `admin`，`reset_pwd_flag=1`，首次登录强制改密）。
 - 初始管理员密码通过环境变量 `OJ_ADMIN_PASSWORD` 提供，仅以 argon2id 哈希落库，不写入源码、版本控制或日志。示例：
 
   ```bash
@@ -1955,7 +2133,58 @@ pgrep -a oj_server
 
 停止后可在同一端口重新启动。
 
+## 数据位置与持久化
+
+| 位置 | 内容/用途 | 权限 | 持久性 |
+|---|---|---|---|
+| `data/oj.db` | SQLite 主库（用户、题目、用例、提交、状态、在途任务） | 服务账号可读写 | **持久化**（业务数据唯一真源） |
+| `data/oj.db-wal` | WAL 日志（已提交但未检查点的数据） | 服务账号可读写 | **运行辅助**，随检查点收敛；**运行中勿删除/移动/单独备份** |
+| `data/oj.db-shm` | WAL 共享内存索引 | 服务账号可读写 | 运行辅助，运行中勿删 |
+| `data/oj.db.lock` | 单实例 `flock` 锁文件（M3.7） | 服务账号可读写 | 运行辅助，进程退出即释放 |
+| `/opt/oj-tmpfs`（`OJ_JUDGE_WORKSPACE`） | 每次判题的 `oj_judge_XXXXXX` 随机目录（源码、编译产物、运行目录） | 根目录 `1777`，子目录 0700 | **临时**（tmpfs；用后即删，重启消失） |
+| `backup/oj-YYYYMMDD.sql` | `sqlite3 .dump` 逻辑备份（含密码哈希/源码/隐藏用例） | `0600`，仅服务账号 | **持久化**（外部备份，已被 `.gitignore` 忽略） |
+| 服务日志 | 启动/停止/判题等运行日志；无内置日志文件，输出到 stdout/stderr | 由运行方式决定 | 临时/由外部收集 |
+| `build/regression-logs/<时间戳>/server.log` | 冒烟回归的服务日志 | 可重建 | 临时（`build/` 已忽略） |
+
+- **持久化 vs 临时**：只有 `data/oj.db` 与 `backup/*.sql` 是需要保留的业务数据；
+  `-wal`/`-shm`/`-lock` 是运行辅助，tmpfs 判题目录是临时产物，构建与回归日志可重建。
+- `data/oj.db`、`data/oj.db-wal`、`data/oj.db-shm`、`data/*.lock`、`backup/*`、
+  `build/`、`*.log` 均已被 `.gitignore` 忽略，不进入版本控制。
+- 真实密钥（`OJ_JWT_SECRET`）与初始口令（`OJ_ADMIN_PASSWORD`）**不在数据库内**，
+  也不在项目中，只由运行环境的环境变量提供；备份文件不含它们，恢复后需另行准备。
+- 判题临时文件不在 `data/` 或备份范围，服务停止/判题结束会按任务清理；崩溃遗留的
+  旧目录不会依据数据库旧 PID 被接管。
+
+## 故障排查
+
+> 基本原则：先看**服务日志**与 `/api/health`，再对照配置。**不要**以关闭沙箱/隔离、
+> 删除数据库或反复重启作为默认手段。以下均对应实际实现或启动检查。
+
+| 现象 | 常见原因 | 处理 |
+|---|---|---|
+| 启动即退出，报 JWT/密码配置错误 | `OJ_JWT_SECRET` 缺失/过短；首次初始化未设 `OJ_ADMIN_PASSWORD` | 按第 5 步设置环境变量；确认长度 ≥ 16 字节。日志会给出明确原因 |
+| `bind` 失败 / 端口被占用 | `--port` 已被其它进程占用 | `ss -ltnp | grep <端口>` 找到占用者；改用其它端口或停止占用进程。不要用自动重启掩盖 |
+| 数据库不可写 / 锁等待失败 | `data/` 无写权限；另有实例持锁（`.lock`）；磁盘满 | 检查 `data/` 属主权限、用 `ss`/`pgrep -a oj_server` 确认无重复实例；SQLite `busy_timeout` 为 5s，长期竞争会返回 `500` 而非假成功 |
+| 静态资源目录错误 / 页面 404 或空白 | `--web` 指向错误；`web/` 不存在 | 确认 `--web web` 存在且含 `index.html`；静态托管仅覆盖该目录。用 `curl -i http://127.0.0.1:<端口>/api/health` 先确认服务在跑 |
+| 判题启动失败：非 tmpfs / 沙箱自检失败 | `/opt/oj-tmpfs` 未挂载或非 tmpfs；内核禁止非特权用户命名空间/AppArmor 限制 | 按第 4 步挂载 tmpfs；按 `dependence.md` 1.2 检查内核能力。**不要**用 `OJ_JUDGE_ALLOW_NON_TMPFS` 或关闭隔离来「修复」正式部署 |
+| 提交返回 `CE`，但代码正确 | 编译器/依赖缺失（`g++`/`gcc` 不在 PATH）、编译超时 | 检查 `g++ --version`/`gcc --version`；查看返回的编译诊断（已清洗内部路径）。环境故障会记为 `SYSERR` 而非 `CE` |
+| 提交返回 `503 JUDGE_QUEUE_FULL` | 等待队列（默认 32）已满 | 稍后重试；前端不自动重试。可评估 `OJ_JUDGE_QUEUE_CAPACITY` 与 `OJ_JUDGE_COMPILE_CONCURRENCY`，但受 3.3 GiB 内存约束，勿盲目调高 |
+| 资源不足 / 判题被 `SIGKILL` 或整体变慢 | 内存紧张（无 Swap）、并发过高 | `free -h` 确认可用内存；下调编译门限/减少并发；构建坚持 `--parallel 1`。恢复内存后再启动 |
+| Windows 转发后空白/一直加载 | 端口未转发；服务未启动或启动失败 | 在 VS Code「端口」面板确认 `8080` 已转发并使用其实际本地地址；先在服务器本机 `curl` 健康检查。见第 9 步 |
+| 重启后出现异常判题/统计变化 | M3.7 启动恢复按当前题目配置重新入队上次崩溃遗留的在途任务；或恢复了旧备份 | 查启动日志是否有「启动恢复」提示；见「崩溃恢复与在途任务持久化（M3.7）」与「从备份恢复数据库」的在途说明 |
+
+- 排查入口：服务 stdout/stderr 日志；`curl -sS --max-time 5 http://127.0.0.1:<端口>/api/health`；
+  `build/regression-logs/<时间戳>/server.log`（冒烟回归）；`ctest -R <name> --output-on-failure`（测试）。
+- 停止服务见「停止服务」；备份/恢复见下一节。
+
 ## 备份与恢复（M6.2）
+
+> 部署视角的简明入口：备份脚本 `scripts/backup.sh`，恢复步骤见本节。
+> 数据库备份与**密钥/服务配置等外部文件分开**：备份只含数据库逻辑内容，
+> **不含** `OJ_JWT_SECRET`、`OJ_ADMIN_PASSWORD`、`web/` 或 tmpfs 文件。
+> 恢复必须**先在隔离路径验证**（新建库 + `integrity_check`/`foreign_key_check` +
+> 关键数据核对），确认后再按本节「正式恢复的操作顺序」切换；**不要**在服务运行时
+> 直接覆盖正式库。cron 需单独配置，**本轮不安装**。
 
 > 本节说明 `scripts/backup.sh` 的用法、cron 定时配置与数据库恢复步骤。
 > **状态**：备份脚本与恢复说明已实现，并已通过独立测试验证（备份可在全新隔离库恢复，

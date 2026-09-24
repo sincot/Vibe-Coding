@@ -5,7 +5,7 @@
 # 后浏览器一直空白/加载。脚本会自动为判题选择可用的 tmpfs，并在启动前打印监听地址。
 #
 # 用法：
-#   OJ_JWT_SECRET="$(openssl rand -hex 32)" OJ_ADMIN_PASSWORD='AdminPass123' \
+#   OJ_JWT_SECRET="$(openssl rand -hex 32)" OJ_ADMIN_PASSWORD='<替换为强密码>' \
 #     bash scripts/run_dev_server.sh
 #
 # 可选环境变量：

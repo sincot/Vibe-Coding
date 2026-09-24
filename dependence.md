@@ -1,46 +1,122 @@
 # 依赖清单与安装指南
 
-> 适用环境：Ubuntu 22.04 LTS（Jammy）x86_64
-> 依据 `SPEC.md` 的实现方案制定（后端 C++ / cpp-httplib，判题 g++/gcc + ASan/UBSan，存储 SQLite，沙箱 seccomp-bpf）
+> 更新于 M6.3（部署文档）。适用环境：Ubuntu 22.04 LTS（Jammy）x86_64。
+> 依据 `SPEC.md` 的实现方案制定（后端 C++ / cpp-httplib，判题 g++/gcc + ASan/UBSan，
+> 存储 SQLite，沙箱为手写 seccomp-bpf + Linux 命名空间）。
 >
-> 本文件记录依赖的来源（系统包 / 源码）、用途与安装方式。版本为在 Ubuntu 22.04 软件源中核实到的候选版本（`apt-cache policy`），随系统更新可能小幅变化。
+> 本文件区分**构建依赖 / 运行依赖 / 可选测试依赖**，并记录每个依赖的**来源**
+> （系统包 / 源码 / 项目内置 / CMake 下载）、用途与安装方式。版本为在 Ubuntu 22.04
+> 软件源中核实到的候选版本（`apt-cache policy`），随系统更新可能小幅变化。
+>
+> **兼容性边界**：本项目只在 Ubuntu 22.04 LTS x86_64（内核 5.15 系列）上验证过。
+> 其它发行版/内核未经验证，依赖名称、沙箱内核能力（非特权用户命名空间、seccomp-bpf、
+> tmpfs）与命令可能不同；**不声称支持所有 Linux 环境**。
 
 ---
 
-## 1. 操作系统
+## 1. 目标环境与前置条件
 
 - 发行版：**Ubuntu 22.04 LTS（Jammy Jellyfish）**
-- 架构：x86_64（内核 5.15.0-*）
+- 架构：x86_64；内核 5.15.0-*（本项目沙箱依赖较新的命名空间/seccomp 特性）
+- 权限：安装系统包需 `sudo`；服务与判题本身**不以 root 运行**
 - 说明：以下安装命令以「空白系统 + 拥有 sudo 权限的普通用户」为前提。
+
+### 1.1 服务器资源约束（重要）
+
+- 目标机内存约 **3.3 GiB**，历史环境**无 Swap**（部署/运行前请用 `free -h`、`swapon --show`
+  重新确认；资源可能已被其它进程占用）。
+- **项目构建必须固定单并发**：`cmake --build build --parallel 1`（或 `-j 1`）。
+  禁止使用无数量的 `-j`（GNU Make 会无限并发）或 `-j$(nproc)`，否则可能耗尽内存、
+  引发严重 I/O 等待甚至 SSH 断连。详见 README 构建一节。
+- 运行阶段的并发由下述判题配置限制（见 8 节），不要与「构建单并发」混为一谈。
+
+### 1.2 沙箱所需内核能力
+
+判题沙箱（M3.3）在启动时会检查以下内核能力，任一不可用即**拒绝启动**
+（不会降级为无保护执行）：
+
+- 非特权用户命名空间（`unshare(CLONE_NEWUSER)` 成功）；
+- `user`/`mount`/`net`/`pid`/`ipc`/`uts` 命名空间；
+- `seccomp-bpf`（`prctl(PR_SET_SECCOMP)`）；
+- 判题工作目录为 **tmpfs**（未显式允许非 tmpfs 时）。
+
+自检命令（只读）：
+
+```bash
+cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || true   # 期望 1 或文件不存在
+cat /proc/sys/user/max_user_namespaces                              # 期望非 0
+grep -E 'Seccomp|Seccomp_filters' /proc/self/status                 # 期望 Seccomp: 0
+mount | grep -E '/opt/oj-tmpfs|type tmpfs'
+```
+
+- 若发行版使用 AppArmor 限制非特权用户命名空间
+  （`kernel.apparmor_restrict_unprivileged_userns=1`，常见于较新 Ubuntu），需按发行版
+  说明调整策略；**不要通过关闭整个沙箱隔离来解决启动失败**。
+- 无挂载权限的开发/测试环境可显式 `OJ_JUDGE_ALLOW_NON_TMPFS=1`
+  （会显著告警），这是**显式开发例外**；正式部署必须挂载 tmpfs。
 
 ---
 
-## 2. 依赖总览
+## 2. 依赖总览（按用途分类）
 
-### 2.1 系统包（`apt` 安装）
+### 2.1 构建依赖（编译服务端与测试所必需）
 
 | 软件/库 | 版本（Jammy 候选） | 用途 |
 |---|---|---|
 | `build-essential` | 12.9（gcc/g++ 11.2.0） | 编译服务端；同时作为判题语言 C++17 / C11 的编译器（ASan/UBSan 随 gcc 自带） |
-| `cmake` | 3.22.1 | 构建工程（M0.2 起使用） |
-| `sqlite3` | 3.37.2 | SQLite 命令行工具，备份脚本 `sqlite3 .dump` 使用 |
+| `cmake` | 3.22.1（项目要求 ≥ 3.16） | 构建工程（M0.2 起使用） |
+| `libcpp-httplib-dev` | 0.10.3 | 后端 HTTP 服务（静态资源托管 + JSON API），构建时链接 |
+| `nlohmann-json3-dev` | 3.10.5 | JSON 序列化 / 解析（API 与判题逐点结果），header-only |
 | `libsqlite3-dev` | 3.37.2 | SQLite 的 C 开发头文件/库，服务端数据层接入 |
-| `libseccomp-dev` | 2.5.3 | seccomp-bpf 沙箱（禁网络 / 文件读写 / 读 /proc 等危险系统调用） |
 | `libargon2-dev` | 0~20171227 | argon2id 密码哈希（AUTH-03） |
 | `libssl-dev` | 3.0.2 | OpenSSL 3.0，JWT HS256 签名所需 libcrypto |
-| `nlohmann-json3-dev` | 3.10.5 | JSON 序列化 / 解析（API 与判题逐点结果） |
-| `libcpp-httplib-dev` | 0.10.3 | 后端 HTTP 服务（静态资源托管 + JSON API） |
-| `libgtest-dev` | 1.11.0 | GoogleTest 单元测试框架（`tests/` 单元测试使用，仅测试构建需要） |
-| `cron` | 3.0pl1 | 定期 `.dump` 备份（PERS-04） |
-| `curl` | 7.81.0 | 回归脚本 `scripts/regression.sh` 发起 HTTP 请求 |
+| `jwt-cpp` | 源码安装（header-only，见 3.5） | JWT 生成 / 校验（AUTH-04） |
+| `pthread`（`libc6-dev`） | 随 `build-essential` | 线程池（`Threads::Threads`） |
 
-### 2.2 源码安装（APT 无包）
+### 2.2 运行依赖（服务与判题实际运行所需）
+
+| 软件/库 | 来源 | 用途 / 说明 |
+|---|---|---|
+| 上述动态库（cpp-httplib、libsqlite3、libargon2、libcrypto） | 系统包 | 运行时动态链接，已随 2.1 安装 |
+| `g++` / `gcc` | `build-essential` | 判题编译用户提交的 C++17 / C11 代码，**运行时必需**（不是构建产物） |
+| 内核命名空间 + seccomp-bpf + tmpfs | 内核/挂载 | 判题沙箱隔离，见 1.2 与 3.9 |
+| `sqlite3` CLI | 系统包（3.2） | **仅备份脚本 `scripts/backup.sh` 需要**；不备份可不装 |
+| `flock`/`timeout`/`mktemp`/`stat`/`awk` | util-linux + coreutils | 备份脚本依赖（Ubuntu 默认已装） |
+| `cron` | 系统包（3.7，可选） | 定时备份（PERS-04），也可手动执行备份而不装 |
+
+### 2.3 可选测试 / 开发依赖（不参与服务运行）
+
+| 软件/库 | 来源 | 用途 / 说明 |
+|---|---|---|
+| `libgtest-dev` | 系统包（3.6） | GoogleTest 单元测试（`tests/unit`），仅测试构建需要 |
+| `curl` | 系统包（3.7） | `scripts/regression.sh` 发起 HTTP 请求 |
+| `python3` | 系统包（通常预装） | `scripts/regression.sh` 解析 JSON 与挑选空闲端口 |
+| `openssl` CLI | 系统包（3.3 附带） | 生成随机 JWT 密钥（`openssl rand -hex 32`）；回归脚本可选 |
+| Node.js + jsdom / Chromium + playwright-cli | 外部，**未纳入仓库** | `tests/frontend/` 前端验证（可选，不注册 CTest） |
+| `gcovr`/`lcov` | 外部，**未纳入仓库** | 可选覆盖率报告（`tests/coverage/`） |
+
+### 2.4 源码安装（APT 无包）
 
 | 软件/库 | 来源 | 用途 |
 |---|---|---|
 | `jwt-cpp` | GitHub `Thalhammer/jwt-cpp`（header-only） | JWT 生成 / 校验（AUTH-04） |
 
 > 说明：jwt-cpp 为 header-only 库，Ubuntu 22.04 未收录（仅有 C 语言版 `libjwt`，非本项目所用 C++ 库），故采用源码安装。
+> 安装后 CMake 通过 `find_path(JWT_CPP_INCLUDE_DIR jwt-cpp/jwt.h)` 定位。
+
+### 2.5 依赖来源与「未使用组件」澄清
+
+- **系统包**：上表 apt 项，由发行版提供。
+- **源码安装**：仅 `jwt-cpp` 一项（header-only，拷贝到 `/usr/local/include`）。
+- **项目内置文件**：种子题目、前端 `web/` 资源、测试用例等均为仓库代码，不是外部依赖。
+- **CMake 下载**：**没有**。`CMakeLists.txt` 只使用 `find_package` / `find_path` /
+  `find_library`，不通过 `FetchContent`/`ExternalProject` 下载任何依赖。前端 CodeMirror
+  由浏览器在运行时从 CDN（cdnjs，固定版本 5.65.21）加载，属运行环境网络条件，非构建依赖。
+- **未使用组件（不要当作必需）**：
+  - `libseccomp-dev`：项目 seccomp 过滤器为**手写经典 BPF**（`linux/seccomp.h` +
+    `linux/filter.h`），**未链接 libseccomp**。该包仅在将来替换沙箱策略时可能有用，
+    当前**非必需**。
+  - 前端无构建工具链（无 Node/npm/webpack/Vite/React/Vue），不要安装。
 
 ---
 
@@ -59,35 +135,21 @@ sudo apt install -y build-essential cmake
 sudo apt install -y sqlite3 libsqlite3-dev
 ```
 
-### 3.3 判题沙箱（seccomp）
+- `libsqlite3-dev` 为服务端数据层与构建必需；`sqlite3` CLI 仅备份脚本需要。
 
-```bash
-sudo apt install -y libseccomp-dev
-```
-
-### 3.4 认证与安全
+### 3.3 认证与安全（argon2、OpenSSL）
 
 ```bash
 sudo apt install -y libargon2-dev libssl-dev
 ```
 
-### 3.5 JSON 与 HTTP 服务
+### 3.4 JSON 与 HTTP 服务
 
 ```bash
 sudo apt install -y nlohmann-json3-dev libcpp-httplib-dev
 ```
 
-### 3.6 单元测试框架（gtest）
-
-```bash
-sudo apt install -y libgtest-dev
-```
-
-- 提供 `GTest::gtest_main` / `GTest::gtest`（头文件与静态库），供 `tests/unit` 的
-  gtest 单元测试（如配置管理 `test_config.cpp`）链接，不参与服务端运行时依赖。
-
-
-### 3.7 jwt-cpp（header-only，源码安装）
+### 3.5 jwt-cpp（header-only，源码安装）
 
 ```bash
 cd /tmp
@@ -102,14 +164,35 @@ rm -rf jwt-cpp
   与项目 JSON 依赖 `nlohmann-json3-dev` 保持一致，无需额外引入 picojson。
 - 运行时需通过环境变量 `OJ_JWT_SECRET` 提供 HS256 签名密钥（详见 README 与本节 6.5）。
 
-### 3.8 运维辅助
+### 3.6 测试依赖（可选）
 
 ```bash
-sudo apt install -y cron curl
+sudo apt install -y libgtest-dev
+```
+
+- 提供 `GTest::gtest_main` / `GTest::gtest`（头文件与静态库），供 `tests/unit` 的
+  gtest 单元测试（如配置管理 `test_config.cpp`）链接，不参与服务端运行时依赖。
+- `curl`、`python3`、`openssl` 由 3.7 与系统预装提供，用于回归脚本。
+
+### 3.7 备份与运维辅助（可选）
+
+```bash
+sudo apt install -y cron curl python3
 sudo systemctl enable --now cron
 ```
 
-### 3.9 判题 tmpfs 运行目录（一次性挂载）
+- `cron`：定期备份（PERS-04）。**本轮部署文档不安装/不修改 crontab**；如不启用定时
+  备份，可不装 cron，手动运行 `scripts/backup.sh` 即可。
+- `curl`/`python3`：`scripts/regression.sh` 冒烟回归所需；`openssl` 用于生成随机密钥。
+
+### 3.8 libseccomp（当前非必需，可选保留）
+
+```bash
+# 仅为将来可能替换沙箱策略时安装；当前实现未使用 libseccomp，不必安装。
+# sudo apt install -y libseccomp-dev
+```
+
+### 3.9 判题 tmpfs 运行目录（正式部署必需）
 
 ```bash
 sudo mkdir -p /opt/oj-tmpfs
@@ -123,16 +206,22 @@ sudo mount -t tmpfs -o size=512M,mode=1777 tmpfs /opt/oj-tmpfs
     （含 ASan 时数 MB），运行阶段工作目录被重新挂载为只读，用户程序无法写入，
     故 512 MiB 足以覆盖并发产物且不会挤占系统所需内存。内存充裕的机器可上调至 1G。
   - `mode=1777` 允许判题子进程写入；工作目录本身由服务以 `mkdtemp` 原子创建为 0700。
-  - 该挂载点在 `/opt` 下、仓库目录之外，重启后需重新挂载。
+  - **权限**：挂载点属主为 root 不影响使用（服务以普通账号在其中创建子目录）。
+  - 该挂载点在 `/opt` 下、仓库目录之外，**重启后需重新挂载**。
 
-- 开机自动挂载：在 `/etc/fstab` 追加一行
+- 开机自动挂载（在 `/etc/fstab` 追加一行）：
 
   ```
   tmpfs /opt/oj-tmpfs tmpfs defaults,size=512M,mode=1777 0 0
   ```
 
-- 不带 sudo 权限时，仅可用于开发/测试：显式设置 `OJ_JUDGE_WORKSPACE=<可写目录>`
-  与 `OJ_JUDGE_ALLOW_NON_TMPFS=1`。此时服务会显著告警，正式部署必须挂载 tmpfs。
+  也可用 systemd mount unit（M5.3 第 14 节已验证 `enabled`+`active`），本轮不安装。
+
+- **正式部署 vs 显式开发例外**：
+  - 正式部署：必须挂载 tmpfs，启动时 `path_is_tmpfs` 与沙箱自检必须通过。
+  - 开发例外：无挂载权限时可显式 `OJ_JUDGE_WORKSPACE=<可写目录>`
+    与 `OJ_JUDGE_ALLOW_NON_TMPFS=1`，服务会显著告警；**不得**用于接收不可信代码。
+  - **不要**通过关闭隔离（禁用命名空间/seccomp）来解决启动失败。
 
 ---
 
@@ -142,11 +231,13 @@ sudo mount -t tmpfs -o size=512M,mode=1777 tmpfs /opt/oj-tmpfs
 g++ --version && gcc --version
 cmake --version
 sqlite3 --version
-dpkg -l libseccomp-dev libargon2-dev libssl-dev nlohmann-json3-dev libcpp-httplib-dev | tail -n +6
-test -f /usr/include/gtest/gtest.h && echo "gtest OK"
+dpkg -l libargon2-dev libssl-dev nlohmann-json3-dev libcpp-httplib-dev | tail -n +6
+test -f /usr/include/gtest/gtest.h && echo "gtest OK"        # 可选测试依赖
 test -f /usr/local/include/jwt-cpp/jwt.h && echo "jwt-cpp OK"
 mount | grep oj-tmpfs
 ```
+
+> 注意：`libseccomp-dev` 不在验证清单内（当前未使用）。
 
 ---
 
@@ -155,6 +246,7 @@ mount | grep oj-tmpfs
 - 前端：原生 HTML/CSS/JS + CodeMirror（CDN 引入，UI-04），无构建流程、无需安装。
 - JWT 逻辑、argon 哈希调用、判题器、Rejudge、日志等均为本项目代码实现。
 - tmpfs 挂载与 cron 定时任务属于运行时配置，非软件安装。
+- `libseccomp-dev` 当前非必需（见 2.5、3.8）。
 
 ---
 
@@ -180,7 +272,7 @@ mount | grep oj-tmpfs
 
 ### 6.4 依赖
 
-数据库（`libsqlite3-dev`）与密码哈希（`libargon2-dev`）在 3.2 / 3.4 节已列出，
+数据库（`libsqlite3-dev`）与密码哈希（`libargon2-dev`）在 3.2 / 3.3 节已列出，
 安装命令见对应小节；无额外新增系统包。
 
 ### 6.5 JWT 签名密钥（M1.2 起）
@@ -229,7 +321,7 @@ M1.5 判题器**不新增系统依赖**：
 
 M3.3 **不新增系统包**。seccomp 过滤器以手写经典 BPF（`linux/seccomp.h` +
 `linux/filter.h`）在父进程预构建、子进程仅 `prctl(PR_SET_SECCOMP)` 加载，未使用
-`libseccomp`（因此 2.1 节的 `libseccomp-dev` 目前非必需，保留以兼容后续可选替换）。
+`libseccomp`（因此 `libseccomp-dev` 目前非必需，见 2.3 / 2.5 / 3.8 节）。
 
 ### 8.2 隔离机制
 
@@ -281,6 +373,16 @@ M3.3 **不新增系统包**。seccomp 过滤器以手写经典 BPF（`linux/secc
 | `OJ_JUDGE_COMPILE_CONCURRENCY` | `2` | 编译阶段并发门限（1..64） |
 | `OJ_JUDGE_QUEUE_CAPACITY` | `32` | 判题等待队列容量（1..256） |
 
+> **三种「并发」不要混淆**：
+> 1. **项目构建并发**（开发/部署时）：固定 `cmake --build build --parallel 1`，
+>    这是编译本项目源码的并发，与运行时判题无关。
+> 2. **判题 worker 数**（运行阶段）：`min(CPU 核数, 8)`，由 `JudgeManager` 在运行时
+>    自动确定，无环境变量可直接覆盖；每个 worker 一次处理一个完整提交。
+> 3. **判题编译门限**（编译阶段）：`OJ_JUDGE_COMPILE_CONCURRENCY`（默认 2），只限制
+>    高内存的 ASan 编译阶段同时数量；运行阶段仍由 worker 数控制。
+> 此外 `OJ_JUDGE_QUEUE_CAPACITY` 只计算「已接收但尚未开始执行」的等待任务数，
+> 与正在执行的任务数分开。
+
 ### 8.5 失败行为与启动检查
 
 - 启动时依次检查：`sandbox_supported`（内核允许非特权用户命名空间）、工作目录是否
@@ -307,6 +409,10 @@ M3.3 **不新增系统包**。seccomp 过滤器以手写经典 BPF（`linux/secc
 > 本机（4 vCPU / 3.3 GiB，无 swap）实测：全量串行 `ctest` 期间系统已用峰值约
 > 2.1 GiB（含开发工具约占 0.9 GiB），剩余可用最低约 1.0 GiB；4 路并发真实判题
 > （编译门限 2）在 1 秒内全部 AC，无异常。
+>
+> **部署/运行前请重新检查**：`free -h`、`swapon --show`、`nproc`。历史环境无 Swap，
+> 若可用内存明显低于上述预算，应先释放内存或下调并发（编译门限）后再启动，
+> 不要在有并发判题时执行全量构建/测试。
 
 ---
 
