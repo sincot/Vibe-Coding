@@ -29,6 +29,10 @@
 - `browser/`：M4.1 真实浏览器验证（`playwright-cli` + 真实 Chromium，桌面与窄视口，
   路由/登录/退出/首改/返回原目标）。Linux 用 `browser/run_m41_browser.sh`，Windows 用
   `browser/run_m41_browser.ps1`；说明见 `browser/README.md`。
+- `browser/m64_browser_scenarios.js` + `browser/run_m64_browser.ps1`（Windows）/
+  `browser/run_m64_browser.sh`（Linux）：M6.4 最终验收 A 全流程真实浏览器场景（注册/重复
+  昵称/登录/admin 首改/UI 建题与隐藏用例/列表搜索·难度·标签·可见性筛选/提交 AC/列表与
+  排行榜/越权与伪造 token/窄视口）。运行说明见 `browser/README.md`「M6.4 有头验收」。
 
 ## 前置条件
 

@@ -19,6 +19,11 @@
   PWCLI=/path/to/playwright-cli PWCLI_BROWSER_LIBS=/path/to/libs \
   BROWSER_ARTIFACTS_DIR=/tmp/m43-artifacts bash tests/frontend/browser/run_m43_browser.sh
   ```
+- `m64_browser_scenarios.js` + `run_m64_browser.ps1` / `run_m64_browser.sh`：M6.4 最终验收 A
+  全流程真实浏览器场景（注册/重复昵称/登录/admin 首改/UI 建题与隐藏用例/列表搜索·难度·
+  标签·可见性筛选/提交 AC/列表与排行榜/越权与伪造 token/窄视口）。除 `__BASE__`/`__OUT__`
+  外还有 `__ADMIN_PW__`（首次管理员密码）。`run_m64_browser.sh` 优先用 `playwright-cli`，
+  否则回退到 `playwright-core`（`PW_CORE_DIR`）；Windows 端见下方「M6.4 有头验收」。
 
 ### 环境准备（Linux，无 root）
 
@@ -121,3 +126,39 @@ M4.1（`m41_browser_scenarios.js`）：`B-01` 桌面题目列表；`B-05` 桌面
 4. 健康但页面仍空白：打开 DevTools 的 Network/Console，确认是否有 pending/失败的
    JS/CSS/API 请求及其状态与 MIME（本目录脚本的 `-Base` 可直接复用该地址）。
    M4.1 的 `api.js` 对请求设 15s 超时，后端无响应时会显示失败而非永久加载。
+
+## M6.4 有头验收（服务器端，虚拟显示）
+
+服务器无物理显示时，可用私有虚拟 X 显示跑**窗口化** Chromium（无 root、不改系统）：
+
+```bash
+# 先按脚本头部说明解包 Xvfb 到 /tmp/opencode/xvfb/root
+bash tests/frontend/browser/run_m64_browser_headed_xvfb.sh
+```
+
+脚本在 `unshare -rm` 私有用户+挂载命名空间内启动 Xvfb（叠加 `/usr/bin` 仅提供
+`xkbcomp` 与 `sh`），再以 `PWCLI_HEADED=1` 运行 `run_m64_browser.sh`。当前实测同一场景
+有头 **24/24** 通过，截图见 `build/acceptance-logs/m64/headed/`。这不是 Windows 通道，
+但确为真实有头 Chromium（窗口在虚拟显示上）。
+
+## M6.4 有头验收（Windows，可选跨平台补充）
+
+M6.4 最终验收 A 的完整业务流在 Windows 有头浏览器上只需三步：
+
+1. 云服务器启动长期隔离服务（独立临时库/密钥/判题目录，不影响正式 `data/oj.db`）：
+
+   ```bash
+   bash build/acceptance-logs/m64/start_windows_server.sh          # 监听 127.0.0.1:18080
+   # 干净复跑（管理员首改后需复位）：--reset
+   ```
+
+2. 通过 VS Code/SSH 把远端 `127.0.0.1:18080` 转发到本机。
+3. 在 Windows 仓库 `tests\frontend\browser\` 目录（含 `m64_browser_scenarios.js`）：
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\run_m64_browser.ps1 `
+     -Base http://localhost:18080 -AdminPassword 'M64WinPw123!' -Headed
+   ```
+
+   脚本以真实有头 Chromium 执行场景，解析并打印逐项通过/失败与截图目录，全部通过退出码 0。
+   服务器本机已用同一场景文件在真实 Chromium（无头）验证 24/24。

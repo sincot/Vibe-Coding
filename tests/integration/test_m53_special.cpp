@@ -111,6 +111,29 @@ long long available_memory_mb() {
   return -1;
 }
 
+// 读取本进程所处 cgroup v2 的 memory.max（MiB）；无硬上限或无法读取返回 -1。
+// 用于在「已被外层硬性 cgroup 内存上限保护」的专用环境中安全执行压力场景。
+long long cgroup_memory_max_mb() {
+  std::ifstream cg("/proc/self/cgroup");
+  std::string line;
+  std::string path;
+  while (std::getline(cg, line)) {
+    if (line.rfind("0::", 0) == 0) {
+      path = line.substr(3);
+      break;
+    }
+  }
+  if (path.empty()) return -1;
+  std::ifstream mx("/sys/fs/cgroup" + path + "/memory.max");
+  std::string value;
+  if (!std::getline(mx, value) || value == "max" || value.empty()) return -1;
+  try {
+    return std::stoll(value) / (1024 * 1024);
+  } catch (...) {
+    return -1;
+  }
+}
+
 JudgeResult judge_src(const std::string &language, const std::string &source,
                       std::vector<Testcase> cases, int time_limit_ms,
                       const std::string &workspace_root,
@@ -253,9 +276,18 @@ void test_host_memory_pressure_gated() {
   }
   const long long limit_mb = 512;
   const long long avail = available_memory_mb();
-  if (avail < limit_mb + 700) {
-    skip("可用内存不足以安全执行宿主机压力场景");
+  const long long cap_mb = cgroup_memory_max_mb();
+  // 若外层以硬性 cgroup 内存上限保护（上限不超过判题内存上限 + 512MiB 余量），
+  // 则即使 RSS 采样未及，内核也会在该 cgroup 内 OOM，宿主机不会被耗尽；此时允许
+  // 执行压力场景。否则仍要求可用内存充足（原有保守门限）。
+  const bool hard_capped = cap_mb > 0 && cap_mb <= limit_mb + 512;
+  if (!hard_capped && avail < limit_mb + 700) {
+    skip("可用内存不足且无硬性 cgroup 上限，跳过宿主机压力场景");
     return;
+  }
+  if (hard_capped) {
+    std::cout << "  检测到硬性 cgroup 内存上限 " << cap_mb
+              << " MiB，在受控压力场景中执行\n";
   }
   TempDir root("m53_special_pressure");
   const char *pressure =
@@ -278,6 +310,61 @@ void test_host_memory_pressure_gated() {
   check(no_leftover_children(), "无遗留子进程");
 }
 
+// ---------------------------------------------------------------------------
+// 尝试填满文件系统：用户程序写入受限于沙箱（/box 只读、/tmp 为沙箱自有 tmpfs），
+// 宿主判题 tmpfs 可用空间不因用户写入显著减少；结束后无残留任务目录。
+// ---------------------------------------------------------------------------
+void test_tmpfs_fill_confined() {
+  std::cout << "尝试填满文件系统：写入受限于沙箱、宿主 tmpfs 不受影响\n";
+  namespace fs = std::filesystem;
+  const std::string host_tmpfs = "/opt/oj-tmpfs";
+  std::error_code ec;
+  if (!fs::exists(host_tmpfs, ec)) {
+    skip("未找到正式判题 tmpfs /opt/oj-tmpfs，跳过填满场景");
+    return;
+  }
+  fs::space_info before = fs::space(host_tmpfs, ec);
+  if (ec) {
+    skip("无法读取 /opt/oj-tmpfs 空间信息，跳过填满场景");
+    return;
+  }
+  const char *fill =
+      "#include <stdio.h>\n"
+      "#include <string.h>\n"
+      "int main(){\n"
+      "  char buf[65536]; memset(buf, 'A', sizeof buf);\n"
+      "  unsigned long long total = 0;\n"
+      "  for (int round = 0; round < 16; ++round) {\n"
+      "    char name[64]; snprintf(name, sizeof name, \"/tmp/fill_%d.bin\", round);\n"
+      "    FILE *f = fopen(name, \"wb\");\n"
+      "    if (!f) continue;\n"
+      "    for (int k = 0; k < 16; ++k) {\n"
+      "      if (fwrite(buf, 1, sizeof buf, f) != sizeof buf) { fclose(f); printf(\"WRITE_FAILED %llu\\n\", total); return 0; }\n"
+      "      total += sizeof buf;\n"
+      "    }\n"
+      "    fclose(f);\n"
+      "  }\n"
+      "  printf(\"WROTE %llu\\n\", total);\n"
+      "  return 0;\n"
+      "}\n";
+  JudgeResult result = judge_src("c11", fill, {{"", ""}}, 3000, host_tmpfs);
+  check(result.status != JudgeStatus::SYSERR,
+        "填满尝试正常返回（非内部错误/不假死）");
+  fs::space_info after = fs::space(host_tmpfs, ec);
+  long long delta = static_cast<long long>(before.available) -
+                    static_cast<long long>(after.available);
+  check(delta < 2LL * 1024 * 1024,
+        "宿主判题 tmpfs 可用空间未因用户写入显著减少（<2MiB）");
+  check(no_leftover_children(), "无遗留子进程");
+  std::error_code dir_ec;
+  long long dirs = 0;
+  for (fs::directory_iterator it(host_tmpfs, dir_ec), end; it != end;
+       it.increment(dir_ec)) {
+    ++dirs;
+  }
+  check(!dir_ec && dirs == 0, "判题工作目录无残留任务目录");
+}
+
 } // namespace
 
 int main() {
@@ -285,6 +372,7 @@ int main() {
   test_sustained_output_tle();
   test_controlled_memory_exceeded();
   test_fork_attempts_denied_no_growth();
+  test_tmpfs_fill_confined();
   test_host_memory_pressure_gated();
 
   std::cout << "\n";

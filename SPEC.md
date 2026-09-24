@@ -1871,12 +1871,49 @@ Vibe-Coding/
 
 #### M6.4 最终验收
 
-- [ ] 按第 5 节 A 验证完整业务流程。
-- [ ] 按第 5 节 B 验证判题正确性。
-- [ ] 按第 5 节 C 验证工程与交付。
-- [ ] 按第 5 节 D 验证安全及性能。
+- [x] 按第 5 节 A 验证完整业务流程。
+- [x] 按第 5 节 B 验证判题正确性。
+- [x] 按第 5 节 C 验证工程与交付。
+- [x] 按第 5 节 D 验证安全及性能。
 
-> 验收时记录通过情况、已知限制及未完成事项，作为验收记录保留，不另设独立交付文档。
+> 实施说明（M6.4 已完成最终验收；逐项结果、证据与已知限制见
+> `tests/M6.4-acceptance-report.md`）：
+>
+> - **A 完整业务流程**：在隔离临时库 + 随机端口的真实 `oj_server` 上，以**真实 Chromium**
+>   （本地缓存构建，非 jsdom）完成注册取 10 位账号、重复昵称拒绝、账号登录、admin 首登
+>   强制改密、管理员经 UI 建题与录入隐藏用例、学生列表搜索/难度/标签/可见性筛选、提交
+>   AC、逐点结果、列表 AC 标记与通过人数 +1、排行榜；桌面 1280×800 与窄视口 360×640
+>   （单列布局、无横向溢出）均验证。29/29 项通过；重启持久化由 `scripts/regression.sh`
+>   与 `m35_persistence_shutdown` 覆盖。普通用户调用管理员接口 403、读取隐藏用例 403、
+>   伪造 token 401、读取他人提交 404 均在浏览器内以真实 HTTP 复核。
+> - **B 判题正确性**：全量常规回归 `ctest --parallel 1` **50/50 通过**（约 245s，最低可用
+>   内存约 704 MiB）；`judge_integration`/`m34_classification` 覆盖 C++17/C11 的
+>   AC/WA/CE/TLE/RE/MLE、行尾空白/文末空行归一化、ASan/UBSan 越界与 UB 判失败并留诊断、
+>   输出截断、编译器缺失 `SYSERR` 后恢复；`m53_*` 与 `sandbox_integration` 覆盖隔离与
+>   资源限制；`submit_scheduling_api` 覆盖队列满载有界 `503`、5 用户并发无混用/无假死。
+> - **C 工程与交付**：`scripts/regression.sh` 成功路径 23/23 且退出码 0，注入失败路径与
+>   非 tmpfs 启动失败均非零退出并正确清理；`scripts/backup.sh` 实际生成 `0600` 备份并
+>   恢复到全新隔离库（`integrity_check=ok`、`foreign_key_check` 无输出、源码/逐点结果/
+>   状态/在途记录保留），启动恢复库观察到 M3.7 在途任务重新入队结算且不重复计数；
+>   `run_dev_server.sh` 实际启动/优雅停止/重启持久化复核通过；Git 工作区干净、无秘密入库。
+> - **D 安全与性能**：恶意行为（网络/文件/进程创建）在隔离已验证有效的沙箱中被阻止，
+>   宿主哨兵文件未被改写，`/proc` 隔离，异常后正常判题恢复；典型 A+B 提交（C++17、
+>   ASan/UBSan、默认隐藏用例）端到端单次约 **0.50–0.52s**，5 人并发全部 AC、wall 约
+>   **1.32s**（判定依据：SPEC“数秒”未给精确口径，采用保守阈值单次 < 5s）。
+> - **边界项落地与已知限制**：无约束 fork 轰炸以有限次尝试证明 seccomp 拒绝零后代；宿主机
+>   内存压力场景已在 `systemd-run --user` 的 cgroup v2 硬性上限（`MemoryMax=768M`）内实际
+>   执行并判 MLE、宿主未受影响；新增判题程序填满文件系统场景，验证只影响沙箱自有 tmpfs、
+>   正式 `/opt/oj-tmpfs` 可用空间不变。开机自动挂载已由**真实重启云服务器**验证：mount unit
+>   `enabled`+`active/mounted`，`tests/scripts/verify_boot_mount.sh` 重启后运行得 8/8、
+>   退出码 0（mount unit 于开机后 3s 自动激活 tmpfs）；脚本会比较挂载激活时间与本次开机
+>   时间，重启前运行会 `[WARN]` 并退出 3，避免误报“已验证”。
+>   有头真实浏览器已在服务器端完成——`tests/frontend/browser/run_m64_browser_headed_xvfb.sh`
+>   在无 root、不改系统的私有 `unshare -rm` 命名空间内用 Xvfb 启动窗口化 Chromium，执行
+>   仓库场景 `tests/frontend/browser/m64_browser_scenarios.js` 得 24/24（截图见
+>   `build/acceptance-logs/m64/headed/`）；Windows 原生 `playwright-cli` 通道无法由云服务器
+>   进程直接驱动，作为可选补充提供 `run_m64_browser.ps1`。
+>   受控样例与硬性 cgroup 通过，不据此宣称可安全运行任意不可信代码；`admin_problems_api`
+>   等历史证据与本轮实际执行分别标注，不重复计入本轮数量。
 
 ---
 
