@@ -639,3 +639,16 @@ add_executable(oj_m51_auth_regression_test
 target_link_libraries(oj_m51_auth_regression_test PRIVATE oj_core)
 
 add_test(NAME m51_auth_regression COMMAND oj_m51_auth_regression_test)
+
+# M5.2 数据访问与权限回归补充集成测试（隔离临时库 + 随机端口 + 可控执行器）：
+# 全部管理员入口四类身份矩阵；提交归属与隐私；题目可见性与标签泄露；可见性变化后
+# 历史保留；用例归属/字段控制/样例边界；非法/越界 ID 与错误不泄露；服务端字段控制与
+# 权限撤销；删题关联一致性；用例增删改与判题顺序/历史一致性；Rejudge 统计联动；
+# 受控并发（重判 vs 新提交、删题 vs 提交结算）。
+add_executable(oj_m52_access_control_test
+  tests/integration/test_m52_access_control.cpp
+)
+
+target_link_libraries(oj_m52_access_control_test PRIVATE oj_core)
+
+add_test(NAME m52_access_control COMMAND oj_m52_access_control_test)
