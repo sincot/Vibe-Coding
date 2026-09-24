@@ -691,3 +691,15 @@ add_custom_target(run_m53_special
   DEPENDS oj_m53_special
   COMMENT "运行 M5.3 特殊（破坏性类别）判题异常测试（受控样例，自带内存自检）"
 )
+
+# M6.2 备份与恢复脚本集成测试（隔离临时库 + sqlite3，shell 驱动）：
+# 备份正常路径与 SQL/输出安全；恢复到新库并核对完整性/外键/关键业务数据/
+# 样例与隐藏用例/源码/索引与 CHECK/序列/在途任务；WAL 已提交数据包含且不动
+# -wal/-shm；错误路径（源库缺失/目录/非库/空库/非法参数/非法环境/不可写目录/
+# 磁盘不足/并发锁）；同日替换与 --no-replace；含空格路径与脱离 cwd；时区；
+# 清理边界；忽略规则；文档与勾选。测试内容见测试脚本自身。
+add_test(NAME m62_backup_restore
+  COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/scripts/test_backup_restore.sh
+          ${CMAKE_CURRENT_SOURCE_DIR} $<TARGET_FILE:oj_server>
+)
+set_tests_properties(m62_backup_restore PROPERTIES TIMEOUT 180)

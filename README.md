@@ -33,7 +33,9 @@
 - [x] M4.4 提交历史与详情（`GET /api/submissions?mine` 本人历史分页（最新优先、可选题目筛选）+ `GET /api/submissions/{id}` 详情（本人/管理员）+ `GET /api/status` 本人题目状态；前端 `#/submissions`、`#/submissions/{id}` 与导航入口，复用 M4.3 结果组件，只读源码、管理员就地重判；已通过独立测试验证：后端单元 7 用例 + 集成 90 项断言、jsdom 31 项，全量回归 43/43，旧前端回归 313/313。见 `tests/M4.4-test-report.md`）
 - [x] M4.5 排行榜（`GET /api/leaderboard` 公开分页查询 + 前端 `#/leaderboard` 与导航入口：按 AC 数↓/总提交次数↑/首次 AC 时间↑/注册时间↑/用户 ID↑ 排序；统计复用既有 `user_problem_status` 持久化数据，仅计入可见题目与有已结算提交的用户，管理员同口径参与；已通过独立测试验证：后端单元 9 用例 + 集成 4 场景/52 项断言、jsdom 23 项，全量常规回归 45/45。见 `tests/M4.5-test-report.md`）
 
-M4.5 排行榜（统计、排序、接口与页面）已通过独立测试验证。M5 安全回归与 M6 测试交付尚未完成。
+M4.5 排行榜已通过独立测试验证；M5 安全与异常回归、M6.1 自动化测试、M6.2 备份与恢复
+均已完成并通过相应回归（M6.2 备份可在隔离库恢复并核对通过，见 `tests/M6.2-test-report.md`）。
+M6.3 部署文档与 M6.4 最终验收未完成。
 
 ## 环境要求
 
@@ -1952,3 +1954,209 @@ pgrep -a oj_server
 ```
 
 停止后可在同一端口重新启动。
+
+## 备份与恢复（M6.2）
+
+> 本节说明 `scripts/backup.sh` 的用法、cron 定时配置与数据库恢复步骤。
+> **状态**：备份脚本与恢复说明已实现，并已通过独立测试验证（备份可在全新隔离库恢复，
+> 完整性与关键数据核对通过）。逐项结果见 `tests/M6.2-test-report.md`。
+
+### 备份脚本 `scripts/backup.sh`
+
+使用 `sqlite3 .dump` 将运行中的数据库导出为 SQL 文本，默认写入 `backup/oj-YYYYMMDD.sql`。
+脚本读取数据库时包含 WAL 中已提交的数据，**不**直接复制主库文件，**不**删除或移动
+运行中的 `-wal`/`-shm`；在单个读事务内导出，多张表来自同一数据库快照。
+
+| 项目 | 值 |
+|---|---|
+| 源数据库 | `--db <路径>`，或 `OJ_DB`，默认 `<仓库>/data/oj.db` |
+| 备份目录 | `--out-dir <目录>`，或 `OJ_BACKUP_DIR`，默认 `<仓库>/backup` |
+| 文件名 | `oj-YYYYMMDD.sql`（日期时区见下） |
+| 文件权限 | `0600`（含密码哈希、源码与隐藏用例，限制为仅属主可读写） |
+| 退出码 | `0` 成功（或 `--no-replace` 跳过）；`1` 备份执行失败；`2` 用法/前置条件错误 |
+
+```bash
+bash scripts/backup.sh --help
+bash scripts/backup.sh
+bash scripts/backup.sh --db /srv/oj/app/data/oj.db --out-dir /srv/oj/backup
+bash scripts/backup.sh --no-replace          # 当天文件已存在则不覆盖
+echo "退出码：$?"
+```
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `OJ_DB` | `<仓库>/data/oj.db` | 源数据库路径 |
+| `OJ_BACKUP_DIR` | `<仓库>/backup` | 备份目录 |
+| `OJ_BACKUP_TZ` | 系统本地时区 | **日期所用时区**（如 `Asia/Shanghai`、`UTC`） |
+| `OJ_BACKUP_BUSY_TIMEOUT_MS` | `5000` | SQLite 锁等待毫秒数 |
+| `OJ_BACKUP_TIMEOUT` | `600` | 单次导出总执行超时（秒），超时终止并失败 |
+| `OJ_BACKUP_LOCK_WAIT` | `30` | 等待备份互斥锁的秒数，超时失败 |
+| `OJ_BACKUP_NO_REPLACE` | `0` | 取 `1` 时当天已存在则跳过，不覆盖 |
+| `OJ_BACKUP_SKIP_SPACE_CHECK` | `0` | 取 `1` 时跳过磁盘空间预检 |
+
+**日期时区**：默认使用**服务器本地时区**（由系统时区决定）；可用 `OJ_BACKUP_TZ` 显式指定，
+脚本会在开始日志中打印实际生效的时区与偏移。注意数据库内 `created_at` 等时间戳为 UTC，
+文件命名时区与库内时间口径不必相同。cron 调度时间为系统本地时间，建议与 `OJ_BACKUP_TZ` 保持一致。
+
+**一致性与成功判定**：脚本先确认源库存在且可读（避免路径写错时 SQLite 自动创建空库后误报成功），
+再在单连接中执行 `BEGIN;` → `.dump` → `COMMIT;`，并设置锁等待与总执行超时。导出先写入备份
+目录中的临时文件（`0600`），随后校验「sqlite3 退出码为 0」「文件非空」「含表结构」「以 `COMMIT;`
+正常收尾」，全部满足才原子替换为正式文件。**文件非空本身不代表成功**；失败时不会留下看似可用的
+正式文件，也不会预先删除当天已有的成功备份。
+
+**并发与同日重跑**：同一备份目录用 `flock` 目录级互斥，避免并发任务同时写入；等待超过
+`OJ_BACKUP_LOCK_WAIT` 秒即失败。同一天重复执行默认在新备份**完整产出后原子替换**已有
+`oj-YYYYMMDD.sql`；加 `--no-replace`/`OJ_BACKUP_NO_REPLACE=1` 则保留已有文件并跳过。临时文件
+名含日期与随机后缀，避免日期变化或冲突造成混乱。
+
+**依赖**：`sqlite3`（见 `dependence.md` 3.2 节），以及 `flock`/`timeout`/`mktemp`/`stat`
+（util-linux 与 coreutils，Ubuntu 默认已装）。缺失任一依赖即明确失败，不静默降级。
+
+**日志与安全**：脚本只输出开始/结束、目标路径、大小、表数、耗时与失败原因，**不**打印 SQL 全文、
+密码哈希、源码或隐藏用例。备份目录已被 `.gitignore` 忽略（仅保留 `backup/.gitkeep`），不在 `web/`
+静态托管范围，也不提交到 Git。本阶段**不**自动删除历史备份、不设置保留天数、不上传云端。
+磁盘不足或写入失败时明确失败，**不**自动清理其它数据腾空间。
+
+### cron 定时备份配置说明
+
+cron 环境不读取交互终端的当前目录与配置：请使用**绝对路径**、显式设置 `PATH`，并以运行服务的
+同一账号执行（见下「执行账号权限」）。以下示例**仅作说明，本轮不修改任何 crontab、不启用定时任务**。
+
+以服务账号（示例 `oj`）编辑用户 crontab：`sudo -u oj crontab -e`
+
+```cron
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+OJ_BACKUP_TZ=Asia/Shanghai
+# 每天 03:30（系统本地时区）备份，日志追加写入独立日志文件
+30 3 * * * /srv/oj/app/scripts/backup.sh --db /srv/oj/app/data/oj.db --out-dir /srv/oj/backup >> /srv/oj/log/backup.log 2>&1
+```
+
+若使用 `/etc/cron.d/oj-backup`（系统级，多一个用户名字段）：
+
+```cron
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+30 3 * * * oj /srv/oj/app/scripts/backup.sh --db /srv/oj/app/data/oj.db --out-dir /srv/oj/backup >> /srv/oj/log/backup.log 2>&1
+```
+
+- **执行时间**：示例为每天 03:30。cron 的调度时间使用系统本地时区；如需特定时区，请设置服务器
+  时区或使用 cron 实现支持的 `CRON_TZ`（取决于 cron 版本），并让 `OJ_BACKUP_TZ` 与之保持一致。
+- **运行账号**：使用运行 OJ 服务的账号，**不要**用 root 运行整个服务或备份。
+- **绝对路径**：`backup.sh`、`--db`、`--out-dir`、日志文件均用绝对路径；脚本自身虽会解析仓库根，
+  但 cron 环境不应依赖当前目录。
+- **必要环境**：至少设置 `PATH`；如需固定日期时区设置 `OJ_BACKUP_TZ`。日志文件所在目录须预先
+  存在且运行账号可写。
+- **日志位置**：将 stdout/stderr 追加到独立日志，便于事后核对；脚本不会自建日志目录。
+
+**手动调用与结果核对**：
+
+```bash
+# 以与 cron 相同的账号执行同样的命令
+bash scripts/backup.sh --db /srv/oj/app/data/oj.db --out-dir /srv/oj/backup; echo "exit=$?"
+ls -l /srv/oj/backup/oj-*.sql
+tail -n 20 /srv/oj/log/backup.log          # 应含“[backup] 备份完成”或明确的失败原因
+```
+
+**确认定时任务实际运行**：
+
+```bash
+sudo -u oj crontab -l                       # 查看已配置的条目
+journalctl -u cron --since today | grep -i backup   # 或 grep CRON /var/log/syslog
+ls -l /srv/oj/backup/oj-$(date +%Y%m%d).sql # 当天应产生新文件（按脚本时区）
+```
+
+**执行账号权限（最小化）**：
+
+- 推荐由**运行服务的同一账号**执行备份：WAL 模式下读取数据库需要访问 `-shm`，同账号最省心。
+- 需要：对 `oj.db` 及 `oj.db-wal` 的**读**权限；对数据库所在**目录**的读+写权限（SQLite 使用
+  `-shm`/锁文件）；对备份目录的**读+写+创建**权限；对 `scripts/backup.sh` 与 `sqlite3` 的执行权限。
+- 首次创建备份目录、设置属主等管理操作可由 root 完成，但**定时执行本身不要求 root**。
+- 定时执行同样遵守脚本的 `flock` 并发锁与磁盘空间预检；避免与其它重任务重叠导致资源紧张。
+
+### 从备份恢复数据库（说明，本轮未执行）
+
+> 恢复验证将在后续独立任务中进行；以下为步骤与注意事项，**本轮不执行**。
+
+**总原则**：SQL 备份先恢复到**新建的隔离数据库路径**，完成核对后再按正式流程切换；不要在服务
+仍连接数据库时直接覆盖主库，也不要混用旧库的 `-wal`/`-shm` 与恢复出的新库。
+
+**第一步：隔离恢复（新库，不影响正式库）**
+
+```bash
+RESTORE_DB=/srv/oj-restore/oj-restore-$(date +%Y%m%d).db
+mkdir -p "$(dirname "$RESTORE_DB")"
+# 从 SQL 文本导入到全新数据库文件（SQL 内含 BEGIN TRANSACTION; ... COMMIT;）
+# -bail：任一语句出错即停止并返回非零，避免“出错但退出码仍为 0”的假成功
+set -o pipefail
+sqlite3 -bail "$RESTORE_DB" < /srv/oj/backup/oj-YYYYMMDD.sql; echo "import exit=$?"
+```
+
+- 检查导入退出码：非 0 表示导入中断，应排查日志后重做，不要使用不完整的库。
+- `.dump` 输出开头含 `PRAGMA foreign_keys=OFF;`，因此导入期间不校验外键，导入后再独立校验。
+
+**第二步：完整性与关键业务数据核对（只读检查）**
+
+```bash
+sqlite3 --readonly "$RESTORE_DB" "PRAGMA integrity_check;"          # 期望 ok
+sqlite3 --readonly "$RESTORE_DB" "PRAGMA foreign_key_check;"        # 期望无输出
+# 关键数据存在性与数量（不打印密码哈希/源码/隐藏用例内容）
+sqlite3 --readonly "$RESTORE_DB" "SELECT account, role, reset_pwd_flag FROM users WHERE account='admin';"
+sqlite3 --readonly "$RESTORE_DB" "SELECT (SELECT count(*) FROM users) AS users,
+  (SELECT count(*) FROM problems) AS problems,
+  (SELECT count(*) FROM testcases) AS testcases,
+  (SELECT count(*) FROM submissions) AS submissions,
+  (SELECT count(*) FROM user_problem_status) AS status_rows,
+  (SELECT count(*) FROM in_flight_tasks) AS in_flight;"
+sqlite3 --readonly "$RESTORE_DB" "SELECT is_sample, count(*) FROM testcases GROUP BY is_sample;"   # 0=隐藏用例 1=公开样例
+sqlite3 --readonly "$RESTORE_DB" "SELECT status, count(*) FROM submissions GROUP BY status;"      # 判题结果分布
+```
+
+恢复说明覆盖的数据范围（均存于逻辑备份）：`users`（用户与管理员，含角色与首改标记）、`problems`
+（题目）、`testcases`（公开样例 `is_sample=1` 与隐藏用例 `is_sample=0`，**含隐藏用例**）、
+`submissions`（完整提交源码、状态、逐点结果、编译信息、耗时/内存、原提交时间）、
+`user_problem_status`（用户题目状态、首次 AC 时间、提交次数），以及 M3.7 的 `in_flight_tasks`
+（在途记录与结算元数据：`task_id`/原提交时间/状态 `pending`/`claimed`/`interrupted`）。
+
+**第三步：SQL 逻辑备份内容 vs 运行配置（边界）**
+
+- 会保留：表结构与列定义、`CHECK` 约束、`UNIQUE`/主外键与索引（以 `CREATE` 语句写入）、
+  触发器/视图（若有）、以及 `AUTOINCREMENT` 计数（`sqlite_sequence` 同步转储）。
+- **不会**包含：连接级与会话级 PRAGMA（如 `journal_mode=WAL`、`synchronous`、`foreign_keys`、
+  `busy_timeout`）。恢复后数据库为默认回滚日志模式，需由现有初始化流程重新开启 WAL 与外键；
+  正式服务启动时会自动执行（见下）。
+- **不会**备份：`OJ_JWT_SECRET`、`OJ_ADMIN_PASSWORD` 等运行配置、服务端环境变量、`web/` 静态
+  前端、判题 tmpfs 外部文件或其它非数据库内容。恢复时需另行准备这些配置。
+
+**第四步：首次打开恢复库时的初始化与迁移（幂等、不重置）**
+
+用现有服务打开恢复库（`--db <恢复库路径>`）时，`initialize_schema` 只会**新增**缺失的表/列与
+索引（`CREATE TABLE IF NOT EXISTS` + 受检的 `ALTER TABLE ADD COLUMN`），并重新启用 WAL 与外键；
+它**不会**重置已有管理员密码、**不会**覆盖角色或首改标记、**不会**自动写入种子数据（种子题仅在
+显式 `--seed` 时导入）。恢复验证必须使用**独立配置**：独立的 `--db`、独立的 `--port`、独立的
+`OJ_JUDGE_WORKSPACE`，不得与正式服务共用端口或判题目录。
+
+**第五步：M3.7 在途任务的恢复行为（重点）**
+
+- 备份快照可能包含**尚未结算**的在途任务（`state='pending'` 或 `claimed`）。启动恢复后的服务时，
+  `RecoveryService` 会把失效的 `claimed` 重置为 `pending`，并**按当前题目配置与用例重新入队判题**。
+  因此：**仅为查看数据时不要启动服务**，请用 `sqlite3 --readonly` 查询，避免无提示触发判题。
+- 快照之后产生的新提交或修改**不在**备份中，不能视为已包含；已标记 `interrupted` 的记录会保留
+  但不再恢复。
+- 恢复库中不存在旧的 `-wal`/`-shm`（由 SQL 文本新建），可避免混用旧 WAL 导致不一致。
+
+**第六步：正式恢复的操作顺序（先验证，再切换）**
+
+1. 先完成上述**隔离恢复与核对**，确认完整性与关键数据无误。
+2. 安排维护窗口，**优雅停止**相关服务（`SIGTERM`/`Ctrl+C`），确认进程已退出、无写入方；此时快照
+   之后未保存的提交无法恢复。
+3. **保留旧数据与回退路径**：将旧的 `oj.db` 连同 `oj.db-wal`、`oj.db-shm`、`oj.db.lock` 整体
+   改名备份到带时间戳的位置，**不要删除**，以便回退。
+4. 将恢复库放到确认的路径（或通过 `--db` 指向新路径），设置属主/权限为服务账号，确保其同级目录
+   **没有**旧库的 `-wal`/`-shm` 残留；以 SQL 导入方式新建的恢复库本身没有 WAL。
+5. 按确认的方案启动服务，检查健康检查、管理员登录、题目列表与只读数据一致性；如需验证判题，
+   务必在隔离环境进行。
+6. 如出现异常，用步骤 3 保留的旧数据回退。
+
+> 本阶段只交付 `scripts/backup.sh` 与恢复说明，**不**提供自动覆盖正式数据库的一键恢复命令；
+> 如后续需要，须先完成独立恢复验证并明确切换方案。

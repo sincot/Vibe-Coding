@@ -35,7 +35,9 @@ data/*.lock
 logs/
 
 # ===== 备份 =====
-backup/
+# 忽略 backup/ 下所有备份内容与临时/锁文件（含隐藏文件），仅保留目录占位文件。
+backup/*
+!backup/.gitkeep
 *.dump
 
 # ===== 临时判题文件 =====
