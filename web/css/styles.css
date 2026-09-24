@@ -968,6 +968,85 @@ pre.code-block {
   color: var(--text-muted);
 }
 
+/* ---------- 题目列表筛选与分页（M4.2） ---------- */
+.problem-filters {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.problem-filters .filter-hint {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.problem-table .col-title {
+  min-width: 180px;
+  max-width: 420px;
+  word-break: break-word;
+}
+
+.problem-table .col-tags {
+  max-width: 320px;
+}
+
+.pagination-page {
+  min-width: 32px;
+  height: 32px;
+  padding: 0 8px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.pagination-page:hover:not(:disabled) {
+  background: var(--surface-muted);
+}
+
+.pagination-page.active {
+  color: #fff;
+  background: var(--primary);
+  border-color: var(--primary);
+  cursor: default;
+}
+
+.pagination-ellipsis {
+  color: var(--text-muted);
+  padding: 0 2px;
+}
+
+.back-link {
+  display: inline-block;
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+
+@media (max-width: 720px) {
+  .problem-filters {
+    align-items: stretch;
+  }
+
+  .problem-filters .filter-field,
+  .problem-filters .filter-actions {
+    width: 100%;
+  }
+
+  .problem-table .col-title {
+    max-width: none;
+  }
+}
+
 /* ---------- 模态框 ---------- */
 .modal-overlay {
   position: fixed;

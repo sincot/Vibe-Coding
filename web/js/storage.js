@@ -38,3 +38,25 @@ export function consumePendingTarget() {
   clearPendingTarget();
   return value;
 }
+
+// 题目列表的返回目标：从列表进入题目详情时记录当前列表地址（含搜索/筛选/页码），
+// 详情页的「返回题目列表」据此恢复列表状态（M4.2）。仅保存在当前标签页，随刷新保留、
+// 关标签即弃；不使用 consume 语义，以便反复往返。
+const PROBLEMS_RETURN_KEY = "oj.problemsReturn";
+
+export function saveProblemsReturn(target) {
+  if (!target) return;
+  try {
+    sessionStorage.setItem(PROBLEMS_RETURN_KEY, String(target));
+  } catch (error) {
+    /* sessionStorage 不可用时退化为默认列表地址 */
+  }
+}
+
+export function peekProblemsReturn() {
+  try {
+    return sessionStorage.getItem(PROBLEMS_RETURN_KEY) || "";
+  } catch (error) {
+    return "";
+  }
+}

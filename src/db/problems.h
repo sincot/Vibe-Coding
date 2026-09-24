@@ -101,6 +101,13 @@ public:
   bool query(const ProblemListQuery &query, ProblemListResult &out,
              std::string &error);
 
+  // 读取题目标签集合（M4.2）：跨所有题目去重，按字节升序稳定排序。
+  // include_hidden=false 时只统计 visible=1 的题目，避免向普通用户/游客泄露
+  // 仅隐藏题目使用的标签；true 供通过管理员检查的调用方使用（含隐藏题目标签）。
+  // 不从分页结果生成，始终基于完整可见范围的题目。返回 false 表示数据库错误。
+  bool list_tags(bool include_hidden, std::vector<std::string> &out,
+                 std::string &error);
+
   // 按 ID 查询题目元数据（不区分可见性；可见性由调用方结合当前身份判断）。
   // 返回 true 表示查询过程正常，found 指示是否存在；返回 false 表示数据库错误。
   bool find_by_id(std::int64_t id, bool &found, ProblemRecord &out,

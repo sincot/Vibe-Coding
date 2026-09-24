@@ -10,7 +10,8 @@ import { api } from "../api.js";
 import { isLoggedIn, requiresPasswordChange } from "../auth.js";
 import { renderJudgeResult } from "../judge.js";
 import { ensureLifecycle } from "../lifecycle.js";
-import { navigate } from "../router.js";
+import { navigate, sanitizeTarget } from "../router.js";
+import { peekProblemsReturn } from "../storage.js";
 import {
   difficultyClass,
   difficultyText,
@@ -26,6 +27,7 @@ export async function renderProblem(container, context = {}) {
   const id = context.params ? context.params.id : "";
   const lifecycle = ensureLifecycle(context.lifecycle);
   document.title = `题目 #${id} · OJ`;
+  const returnTarget = listReturnTarget();
   container.appendChild(
     h("div", { class: "state" }, [
       h("span", { class: "spinner" }),
@@ -46,7 +48,7 @@ export async function renderProblem(container, context = {}) {
       text: "返回题目列表",
       attrs: { type: "button" },
     });
-    back.addEventListener("click", () => navigate("/problems"));
+    back.addEventListener("click", () => navigate(returnTarget));
     let text;
     if (error.status === 404) text = "题目不存在或你没有权限查看。";
     else if (error.status === 400) text = "题目 ID 无效，请从题目列表进入。";
@@ -65,14 +67,21 @@ export async function renderProblem(container, context = {}) {
   document.title = `${problem.title || "题目"} · OJ`;
   container.replaceChildren();
   const layout = h("div", { class: "problem-layout" }, [
-    buildLeftPane(problem),
+    buildLeftPane(problem, returnTarget),
     buildRightPane(problem, lifecycle),
   ]);
   container.appendChild(layout);
   return () => lifecycle.dispose();
 }
 
-function buildLeftPane(problem) {
+// 从列表进入详情时保存的列表地址（含搜索/筛选/页码），经路由校验后用于返回；
+// 无有效保存值时回退默认题目列表。刷新后由 sessionStorage 恢复。
+function listReturnTarget() {
+  const saved = sanitizeTarget(peekProblemsReturn());
+  return saved || "/problems";
+}
+
+function buildLeftPane(problem, returnTarget) {
   const tags = tagList(problem.tags);
   const meta = h("div", { class: "problem-meta" }, [
     h("span", {
@@ -82,7 +91,14 @@ function buildLeftPane(problem) {
     ...tags.map((tag) => h("span", { class: "tag", text: tag })),
   ]);
 
+  const back = h("a", {
+    class: "back-link",
+    text: "← 返回题目列表",
+    attrs: { href: "#" + returnTarget },
+  });
+
   const children = [
+    back,
     h("h1", { class: "page-title", text: problem.title || "" }),
     meta,
     h("div", {

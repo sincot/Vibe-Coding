@@ -400,6 +400,76 @@ await scenario("M41-13 退出后晚返回的请求不恢复页面", async () => 
   window.fetch = orig;
 });
 
+// ===========================================================================
+await scenario("M41-14 普通用户直接访问后台被拒", async () => {
+  const lg = await api("POST", "/api/login", {
+    body: { account: ctx.userAccount, password: ctx.userPassword },
+  });
+  check("普通用户可登录取得 token", lg.status === 200 && !!lg.data.token, JSON.stringify(lg.data));
+  setDomAuth(lg.data.token, lg.data.user);
+  await goto("/admin");
+  await waitFor(() => /无权访问后台/.test(bodyText()), { label: "admin forbidden" });
+  check("普通用户显示无权访问后台", /无权访问后台/.test(bodyText()), bodyText().slice(0, 120));
+  check("不渲染后台管理内容", !/题目管理/.test(bodyText()), bodyText().slice(0, 160));
+  clearDomAuth();
+});
+
+// ===========================================================================
+await scenario("M41-15 页脚管理员入口按身份渲染", async () => {
+  clearDomAuth();
+  nav.renderNav();
+  check(
+    "游客无页脚管理员入口",
+    (el("footer-admin").textContent || "").trim() === "",
+    el("footer-admin").textContent
+  );
+  setDomAuth(ctx.adminToken, ctx.adminUser);
+  nav.renderNav();
+  check(
+    "管理员显示页脚管理员入口",
+    /管理员入口/.test(el("footer-admin").textContent || ""),
+    el("footer-admin").textContent
+  );
+  clearDomAuth();
+  nav.renderNav();
+});
+
+// ===========================================================================
+await scenario("M41-16 后端 403 改密要求引导改密页", async () => {
+  const apiUrl = pathToFileURL(path.join(ROOT, "web/js/api.js")).href;
+  const apiMod = await import(apiUrl);
+  apiMod.resetPasswordChangeGuard();
+  setDomAuth(ctx.adminToken, ctx.adminUser);
+  const orig = globalThis.fetch;
+  globalThis.fetch = (input, init) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (/\/api\/admin\/users/.test(url)) {
+      return Promise.resolve(
+        new Response(JSON.stringify({ error: "请先修改密码", code: "PASSWORD_CHANGE_REQUIRED" }), {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        })
+      );
+    }
+    return orig(input, init);
+  };
+  window.fetch = globalThis.fetch;
+
+  await goto("/admin/users");
+  await waitFor(() => hash() === "#/password", { label: "password required redirect" });
+  check("403 改密要求跳转改密页", hash() === "#/password", hash());
+  check(
+    "保留原目标供改密后返回",
+    storage.peekPendingTarget() === "/admin/users",
+    storage.peekPendingTarget()
+  );
+
+  globalThis.fetch = orig;
+  window.fetch = orig;
+  storage.clearPendingTarget();
+  clearDomAuth();
+});
+
 // ---------------------------------------------------------------------------
 check("无浏览器脚本错误 / 未处理拒绝", consoleErrors.length === 0, consoleErrors.join(" || "));
 const passed = results.filter((r) => r.ok).length;

@@ -81,6 +81,15 @@ check("非法编码目标被拒", router.sanitizeTarget("/problems/%E0%A4%A") ==
 check("路径穿越目标被拒", router.sanitizeTarget("/problems/%2e%2e") === "");
 check("解码出斜杠目标被拒", router.sanitizeTarget("/problems/a%2Fb") === "");
 
+// L-S1（补充）：查询串解码——M4.1 parseHash 为列表筛选/分页路由提供已解码参数。
+globalThis.location.hash = "#/problems?q=%E4%B8%AD%E6%96%87&page=2";
+const phq = router.parseHash();
+check(
+  "L-S1 查询串中文与页码解码",
+  phq.path === "/problems" && phq.query.get("q") === "中文" && phq.query.get("page") === "2",
+  JSON.stringify({ path: phq.path, q: phq.query.get("q"), page: phq.query.get("page") })
+);
+
 // ==========================================================================
 // T-03 sanitizeTarget 开放重定向防护
 // ==========================================================================
@@ -95,6 +104,13 @@ check("拒绝流程页 /login", router.sanitizeTarget("/login") === "");
 check("拒绝流程页 /register", router.sanitizeTarget("/register") === "");
 check("拒绝流程页 /password", router.sanitizeTarget("/password") === "");
 check("查询串含 # 被拒", router.sanitizeTarget("/problems?a=1#x") === "");
+
+// L-S2（补充）：合法站内列表目标（含查询串）应原样保留，供登录后返回。
+check(
+  "L-S2 合法列表查询目标保留",
+  router.sanitizeTarget("/problems?q=A%2BB&page=2") === "/problems?q=A%2BB&page=2",
+  router.sanitizeTarget("/problems?q=A%2BB&page=2")
+);
 
 // ==========================================================================
 // T-04 resolvePostAuthTarget 权限判定

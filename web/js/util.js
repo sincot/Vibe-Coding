@@ -239,6 +239,75 @@ export function pagination(page, totalPages, onChange) {
   return wrap;
 }
 
+// 紧凑分页：上一页 / 首页 + 当前页附近的页码（含省略号）/ 末页 / 下一页。
+// 页数较多时不会一次生成海量按钮；当前页高亮且不可重复点击。
+export function compactPagination(page, totalPages, onChange) {
+  const wrap = h("div", { class: "pagination" });
+  const parsedTotal =
+    Number.isFinite(totalPages) && totalPages > 0 ? Math.floor(totalPages) : 1;
+  const safeTotal = Math.max(1, parsedTotal);
+  const parsedPage = Number.isFinite(page) ? Math.floor(page) : 1;
+  const current = Math.min(Math.max(1, parsedPage), safeTotal);
+
+  const prev = h("button", {
+    class: "btn btn-secondary btn-sm",
+    text: "上一页",
+    attrs: { type: "button" },
+  });
+  prev.disabled = current <= 1;
+  prev.addEventListener("click", () => onChange(current - 1));
+  wrap.appendChild(prev);
+
+  const items = paginationItems(current, safeTotal);
+  for (const item of items) {
+    if (item === "…") {
+      wrap.appendChild(h("span", { class: "pagination-ellipsis", text: "…" }));
+      continue;
+    }
+    const isCurrent = item === current;
+    const button = h("button", {
+      class: "pagination-page" + (isCurrent ? " active" : ""),
+      text: String(item),
+      attrs: {
+        type: "button",
+        "aria-current": isCurrent ? "page" : null,
+        "aria-label": `第 ${item} 页`,
+      },
+    });
+    button.disabled = isCurrent;
+    if (!isCurrent) button.addEventListener("click", () => onChange(item));
+    wrap.appendChild(button);
+  }
+
+  const next = h("button", {
+    class: "btn btn-secondary btn-sm",
+    text: "下一页",
+    attrs: { type: "button" },
+  });
+  next.disabled = current >= safeTotal;
+  next.addEventListener("click", () => onChange(current + 1));
+  wrap.appendChild(next);
+
+  return wrap;
+}
+
+// 生成紧凑页码序列：总页数不多时全部展示，否则展示首页/末页与当前页附近页码。
+function paginationItems(current, total) {
+  if (total <= 7) {
+    const all = [];
+    for (let i = 1; i <= total; i += 1) all.push(i);
+    return all;
+  }
+  const items = [1];
+  const start = Math.max(2, current - 1);
+  const end = Math.min(total - 1, current + 1);
+  if (start > 2) items.push("…");
+  for (let i = start; i <= end; i += 1) items.push(i);
+  if (end < total - 1) items.push("…");
+  items.push(total);
+  return items;
+}
+
 export function setBusy(button, busy, busyText = "处理中…", idleText = null) {
   if (!button) return;
   if (busy) {

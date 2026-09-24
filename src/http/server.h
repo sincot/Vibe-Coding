@@ -109,6 +109,10 @@ private:
                               httplib::Response &res);
   void handle_problem_list(const httplib::Request &req,
                            httplib::Response &res);
+  // 题目标签选项（M4.2）：公开接口，返回当前访问者可见范围内题目使用的
+  // 去重标签集合，供列表页标签筛选下拉框使用（不是从分页结果拼凑）。
+  void handle_problem_tags(const httplib::Request &req,
+                           httplib::Response &res);
   void handle_problem_detail(const httplib::Request &req,
                              httplib::Response &res);
   void handle_submit(const httplib::Request &req, httplib::Response &res);

@@ -1,6 +1,7 @@
 #include "db/problems.h"
 
 #include <cctype>
+#include <set>
 
 #include <sqlite3.h>
 
@@ -233,6 +234,35 @@ bool ProblemStore::query(const ProblemListQuery &query,
     error = stmt.errmsg();
     return false;
   }
+}
+
+bool ProblemStore::list_tags(bool include_hidden,
+                             std::vector<std::string> &out,
+                             std::string &error) {
+  const char *sql = include_hidden
+                        ? "SELECT tags FROM problems"
+                        : "SELECT tags FROM problems WHERE visible = 1";
+  Statement stmt;
+  if (!db_.prepare(sql, stmt, error)) {
+    return false;
+  }
+  std::set<std::string> unique;
+  while (true) {
+    int rc = stmt.step();
+    if (rc == SQLITE_ROW) {
+      for (const std::string &tag : split_tags(stmt.column_text(0))) {
+        unique.insert(tag);
+      }
+      continue;
+    }
+    if (rc == SQLITE_DONE) {
+      break;
+    }
+    error = stmt.errmsg();
+    return false;
+  }
+  out.assign(unique.begin(), unique.end());
+  return true;
 }
 
 bool ProblemStore::find_by_id(std::int64_t id, bool &found, ProblemRecord &out,

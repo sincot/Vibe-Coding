@@ -499,6 +499,11 @@ void HttpServer::setup_routes() {
                                    httplib::Response &res) {
     handle_problem_list(req, res);
   });
+  // 标签选项用独立静态路径，避免与 /api/problems/{id} 的动态段混淆。
+  svr_.Get("/api/problem-tags", [this](const httplib::Request &req,
+                                       httplib::Response &res) {
+    handle_problem_tags(req, res);
+  });
   // 详情路径用正则匹配任意非空路径段，便于对非法 ID 返回明确的 400（而非 404）。
   // [^/]+ 不匹配斜杠，因此不会吞掉后续 /api/problems/{id}/submit 等子路径。
   svr_.Get(R"(/api/problems/([^/]+))", [this](const httplib::Request &req,
@@ -916,6 +921,33 @@ void HttpServer::handle_problem_list(const httplib::Request &req,
   body["total"] = result.total;
   body["total_pages"] = total_pages;
   send_json(res, 200, body);
+}
+
+void HttpServer::handle_problem_tags(const httplib::Request &req,
+                                     httplib::Response &res) {
+  ProblemViewer viewer;
+  if (!resolve_viewer(req, res, viewer)) {
+    return;
+  }
+
+  // 标签选项只反映当前访问者可见范围内的题目：管理员（含隐藏）可取全部，
+  // 游客与普通用户仅取 visible=1 的题目，避免泄露仅隐藏题目使用的标签。
+  // 选项基于完整题目集合去重、按字节稳定排序，而不是从当前分页结果拼凑。
+  std::vector<std::string> tags;
+  std::string err;
+  if (!problem_store_.list_tags(viewer.is_admin, tags, err)) {
+    log(LogLevel::Error, "题目标签查询失败: " + err);
+    send_error(res, 500, "内部错误");
+    return;
+  }
+
+  json tag_list = json::array();
+  for (const std::string &tag : tags) {
+    tag_list.push_back(tag);
+  }
+  json tag_body;
+  tag_body["tags"] = std::move(tag_list);
+  send_json(res, 200, tag_body);
 }
 
 void HttpServer::handle_problem_detail(const httplib::Request &req,
