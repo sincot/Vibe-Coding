@@ -317,6 +317,64 @@ ctest --test-dir build -R static_files_unit --output-on-failure
 `.git/config`、越界系统文件）被拒绝且不回显内容；空/不存在的 `web_root` 只跳过静态
 托管并保持 `/api` 可用；静态托管不影响健康检查、题目列表与注册 POST。
 
+### 端到端冒烟回归脚本（M6.1）
+
+`scripts/regression.sh` 是端到端冒烟回归入口（**不是全量测试入口**）：在已有构建产物
+基础上，一次完成隔离数据准备（临时库 + 内置种子题）、测试服务启动与健康检查、真实
+HTTP 接口断言、结果汇总与统一清理。它验证的链路为：注册 → 登录 → 鉴权（`/api/me`）→
+取题 → C++17/C11 已知 AC/WA 提交并按 JSON 判题状态断言 → 重启后本人历史持久化。
+
+```bash
+bash scripts/regression.sh                          # 自动挑选空闲端口与 tmpfs 判题目录
+OJ_REGRESSION_PORT=18080 bash scripts/regression.sh
+OJ_REGRESSION_KEEP=1 bash scripts/regression.sh     # 排查失败时保留临时目录
+```
+
+- 前置条件：先构建 `cmake --build build --parallel 1`；依赖 `curl`、`python3`（可靠
+  JSON 解析与空闲端口选择），`openssl` 可选。脚本**不会自动构建或下载工具**。
+- 隔离：独立 `mktemp` 临时库、随机测试 JWT 密钥与测试管理员密码、独立空闲端口、优先
+  `/opt/oj-tmpfs` → `/dev/shm` 的 tmpfs 判题目录；不连接/修改 `data/oj.db`，不使用真实
+  管理员密码，日志不写入密钥/token。
+- 失败语义：任一关键断言失败、服务启动失败或健康检查超时均返回非零退出码，并打印
+  场景、期望与实际；服务启动失败会保留诊断日志。`OJ_REGRESSION_INJECT_FAILURE=1`
+  仅用于验证脚本自身失败路径（正常运行勿设）。
+- 清理：`INT/TERM/EXIT` 统一清理，只终止本轮以记录 PID 启动的服务，先停服务再删除
+  临时数据；完整服务日志保留在 `build/regression-logs/<时间戳>/server.log`（`build/`
+  已被忽略）。
+- 通过退出码 0；交互终端以绿色显示通过，重定向时为纯文本，颜色不代替断言与退出码。
+
+### 全量常规回归与特殊测试
+
+全量常规回归（已注册的常规单元 + 集成测试，固定单并发、串行）：
+
+```bash
+ctest --test-dir build --parallel 1 --output-on-failure --timeout 120
+```
+
+- 构建固定 `cmake --build build --parallel 1`；构建结束后再串行执行，遵守约 3.3 GiB
+  服务器资源约束。
+- 压力/超内存/死循环等**破坏性**测试有意不注册到 CTest：`oj_m53_special` 需通过
+  `cmake --build build --target run_m53_special` 显式执行（自带内存自检）；常规回归
+  `ctest -N` 不包含它。
+- 前端逻辑/DOM 与真实浏览器验证是可选项，位于 `tests/frontend/`，不经 CTest 注册，
+  用法见 `tests/frontend/README.md`。
+- 失败排查入口：CTest 的 `--output-on-failure` 输出；单项直接执行对应
+  `build/oj_<name>`；冒烟回归看 `build/regression-logs/<时间戳>/server.log`。
+
+### 可选 C++ 覆盖率（非 M6.1 要求，不注册 CTest）
+
+在独立目录 `build-cov/` 采集 gcov 覆盖率，生成 gcovr（行/分支）与 lcov（含函数）HTML 报告；
+不修改 `build/` 与 `CMakeLists.txt`，不进入常规回归。
+
+```bash
+bash tests/coverage/install_tools_local.sh   # 免 sudo 安装 gcovr/lcov/genhtml
+bash tests/coverage/run_coverage.sh          # 配置→单并发构建→串行 CTest→生成报告
+# 报告：build-cov/coverage/index.html（gcovr）、build-cov/coverage/html-lcov/index.html（lcov）
+```
+
+说明与最近一次实测数据见 `tests/coverage/README.md` 与 `tests/M6.1-test-report.md`
+第 10 节。覆盖率是可选 QA 增强，未采集时不得声称“全部函数/分支已覆盖”。
+
 ## 运行
 
 ```bash
