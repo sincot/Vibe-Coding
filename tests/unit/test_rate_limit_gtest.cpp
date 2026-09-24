@@ -117,6 +117,20 @@ TEST(RateLimiterTest, RecoversAfterWindowExpiry) {
   EXPECT_EQ(rl->allow("ip").status, RateLimiter::Status::Allowed);
 }
 
+// 窗口边界：以「严格大于窗口」判定过期。自最早失败起恰好一个窗口时长时仍视为
+// 窗口内（继续 Blocked），超过后才解除；与实现 `now - oldest > window` 一致。
+TEST(RateLimiterTest, WindowBoundaryIsExclusive) {
+  FakeClock fc;
+  auto rl = MakeLimiter(2, 60, fc);
+
+  rl->allow("ip");
+  rl->allow("ip");
+  fc.seconds = 60; // 恰好等于窗口
+  EXPECT_EQ(rl->allow("ip").status, RateLimiter::Status::Blocked);
+  fc.seconds = 61; // 超过窗口
+  EXPECT_EQ(rl->allow("ip").status, RateLimiter::Status::Allowed);
+}
+
 TEST(RateLimiterTest, ClearResetsFailureCount) {
   FakeClock fc;
   auto rl = MakeLimiter(2, 60, fc);

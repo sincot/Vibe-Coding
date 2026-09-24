@@ -627,3 +627,15 @@ add_executable(oj_m45_leaderboard_api_test
 target_link_libraries(oj_m45_leaderboard_api_test PRIVATE oj_core)
 
 add_test(NAME m45_leaderboard_api COMMAND oj_m45_leaderboard_api_test)
+
+# M5.1 账号与认证回归补充集成测试（隔离临时库 + 随机端口 + 专用测试密钥）：
+# 登录限速不信任转发头/成功清计数/受控并发不可绕过/窗口边界；昵称规范化唯一性与
+# 内部空白、密码不裁剪、昵称按字节计长；并发不同昵称注册与账号唯一；账号永久不复用
+# （数据库唯一约束 + 重启保留）；登录失败响应不泄露哈希/明文。
+add_executable(oj_m51_auth_regression_test
+  tests/integration/test_m51_auth_regression.cpp
+)
+
+target_link_libraries(oj_m51_auth_regression_test PRIVATE oj_core)
+
+add_test(NAME m51_auth_regression COMMAND oj_m51_auth_regression_test)

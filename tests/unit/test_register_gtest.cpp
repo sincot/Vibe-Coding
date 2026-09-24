@@ -177,6 +177,34 @@ TEST(NicknameValidationTest, EnforcesMaxLength) {
       oj::auth::validate_nickname(std::string(31, 'a'), normalized, err));
 }
 
+// 长度上限按「字节」而非「字符」计（与 title/tags 等字段一致）。以 UTF-8 多字节
+// 字符（每个 3 字节）锁定该口径：10 个 = 30 字节接受，11 个 = 33 字节拒绝。
+TEST(NicknameValidationTest, CountsBytesNotCharacters) {
+  std::string normalized, err;
+  std::string cjk10;
+  for (int i = 0; i < 10; ++i) {
+    cjk10 += "\xe4\xb8\xad"; // "中"
+  }
+  ASSERT_EQ(cjk10.size(), 30u);
+  EXPECT_TRUE(oj::auth::validate_nickname(cjk10, normalized, err));
+  EXPECT_EQ(normalized, cjk10);
+
+  std::string cjk11 = cjk10 + "\xe4\xb8\xad";
+  ASSERT_EQ(cjk11.size(), 33u);
+  EXPECT_FALSE(oj::auth::validate_nickname(cjk11, normalized, err));
+}
+
+// 先去除首尾空白，再判断长度：原始输入可超过 30 字节，只要去空白后不超过。
+TEST(NicknameValidationTest, TrimsBeforeCheckingLength) {
+  std::string normalized, err;
+  std::string padded = "  " + std::string(30, 'a') + "  ";
+  EXPECT_TRUE(oj::auth::validate_nickname(padded, normalized, err));
+  EXPECT_EQ(normalized, std::string(30, 'a'));
+
+  std::string too_long = "  " + std::string(31, 'a') + "  ";
+  EXPECT_FALSE(oj::auth::validate_nickname(too_long, normalized, err));
+}
+
 // ---------------------------------------------------------------------------
 // 密码校验
 // ---------------------------------------------------------------------------
