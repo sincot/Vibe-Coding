@@ -3,9 +3,11 @@
 // 支持新增、编辑、删除与排序。内容原样保存，不做 trim 或换行归一化。
 //
 // 归属：所有写请求都同时携带 URL 中的题目 ID 与对应的用例 ID，避免把某题的
-// 用例修改到另一题。切换题目或快速导航时通过 disposed/token 丢弃过期响应。
+// 用例修改到另一题。切换题目或快速导航时通过生命周期（占位代次 + AbortSignal）
+// 丢弃过期响应。
 
 import { api } from "../api.js";
+import { ensureLifecycle } from "../lifecycle.js";
 import {
   confirmDialog,
   h,
@@ -24,8 +26,8 @@ import {
 
 const MAX_TEXT_BYTES = 64 * 1024;
 
-export function renderAdminTestcases(container, context) {
-  const problemId = context.params.id;
+export function renderAdminTestcases(container, context = {}) {
+  const problemId = (context.params || {}).id;
   const area = adminShell(container, {
     title: `测试用例 · 题目 #${problemId}`,
     subtitle:
@@ -33,33 +35,32 @@ export function renderAdminTestcases(container, context) {
     active: "problems",
   });
 
-  let disposed = false;
-  let token = 0;
+  const lifecycle = ensureLifecycle(context.lifecycle);
 
   async function load() {
-    const current = ++token;
+    const current = lifecycle.next();
     area.replaceChildren(loadingBlock("用例加载中…"));
     let problem;
     let data;
     try {
-      problem = await api.get("/api/problems/" + encodeURIComponent(problemId));
+      problem = await api.get("/api/problems/" + encodeURIComponent(problemId), {
+        signal: lifecycle.signal,
+      });
       data = await api.get(
-        "/api/admin/problems/" + encodeURIComponent(problemId) + "/testcases"
+        "/api/admin/problems/" + encodeURIComponent(problemId) + "/testcases",
+        { signal: lifecycle.signal }
       );
     } catch (error) {
-      if (disposed || current !== token) return;
+      if (error.aborted || !lifecycle.isCurrent(current)) return;
       renderRequestError(area, error, load);
       return;
     }
-    if (disposed || current !== token) return;
+    if (!lifecycle.isCurrent(current)) return;
     area.replaceChildren(buildContent(problemId, problem, data, load));
   }
 
   load();
-  return () => {
-    disposed = true;
-    token++;
-  };
+  return () => lifecycle.dispose();
 }
 
 function buildContent(problemId, problem, data, reload) {

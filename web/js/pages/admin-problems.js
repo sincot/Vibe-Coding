@@ -3,6 +3,7 @@
 // /api/admin/problems[/{id}]）。前端只做基本校验，最终以服务端校验为准。
 
 import { api } from "../api.js";
+import { ensureLifecycle } from "../lifecycle.js";
 import { navigate } from "../router.js";
 import {
   confirmDialog,
@@ -63,18 +64,19 @@ function adminCard(title, desc, path) {
   ]);
 }
 
-export function renderAdminProblems(container, context) {
+export function renderAdminProblems(container, context = {}) {
   const area = adminShell(container, {
     title: "题目管理",
     subtitle: "可查看公开与隐藏题目，并按可见性筛选。",
     active: "problems",
   });
 
+  const query = context.query || new URLSearchParams();
   const state = {
-    page: parsePage(context.query.get("page")),
-    visible: normalizeVisibility(context.query.get("visible")),
-    q: context.query.get("q") || "",
-    difficulty: context.query.get("difficulty") || "",
+    page: parsePage(query.get("page")),
+    visible: normalizeVisibility(query.get("visible")),
+    q: query.get("q") || "",
+    difficulty: query.get("difficulty") || "",
   };
 
   const createBtn = h("a", {
@@ -91,8 +93,7 @@ export function renderAdminProblems(container, context) {
   area.appendChild(toolbar);
   area.appendChild(listArea);
 
-  let disposed = false;
-  let loadToken = 0;
+  const lifecycle = ensureLifecycle(context.lifecycle);
 
   function updateQuery() {
     const params = new URLSearchParams();
@@ -152,7 +153,7 @@ export function renderAdminProblems(container, context) {
   }
 
   async function load() {
-    const token = ++loadToken;
+    const token = lifecycle.next();
     listArea.replaceChildren(buildFilters());
     listArea.appendChild(loadingBlock("题目加载中…"));
     const params = new URLSearchParams();
@@ -163,13 +164,15 @@ export function renderAdminProblems(container, context) {
 
     let data;
     try {
-      data = await api.get("/api/problems?" + params.toString());
+      data = await api.get("/api/problems?" + params.toString(), {
+        signal: lifecycle.signal,
+      });
     } catch (error) {
-      if (disposed || token !== loadToken) return;
+      if (error.aborted || !lifecycle.isCurrent(token)) return;
       renderRequestError(listArea, error, load);
       return;
     }
-    if (disposed || token !== loadToken) return;
+    if (!lifecycle.isCurrent(token)) return;
 
     const problems = data && Array.isArray(data.problems) ? data.problems : [];
     listArea.appendChild(h("div", { class: "muted list-count", text: `共 ${data.total ?? problems.length} 道题` }));
@@ -187,10 +190,7 @@ export function renderAdminProblems(container, context) {
   }
 
   load();
-  return () => {
-    disposed = true;
-    loadToken++;
-  };
+  return () => lifecycle.dispose();
 }
 
 function buildTable(problems, reload) {
@@ -353,8 +353,8 @@ function normalizeVisibility(value) {
 // 创建 / 编辑表单
 // ---------------------------------------------------------------------------
 
-export function renderAdminProblemForm(container, context) {
-  const id = context.params.id;
+export function renderAdminProblemForm(container, context = {}) {
+  const id = (context.params || {}).id;
   const isEdit = id !== undefined && id !== null && id !== "";
   const area = adminShell(container, {
     title: isEdit ? `编辑题目 #${id}` : "新建题目",
@@ -362,26 +362,26 @@ export function renderAdminProblemForm(container, context) {
     active: "problems",
   });
 
-  let disposed = false;
+  const lifecycle = ensureLifecycle(context.lifecycle);
   (async () => {
     area.replaceChildren(loadingBlock("加载题目中…"));
     let problem = null;
     if (isEdit) {
       try {
-        problem = await api.get("/api/problems/" + encodeURIComponent(id));
+        problem = await api.get("/api/problems/" + encodeURIComponent(id), {
+          signal: lifecycle.signal,
+        });
       } catch (error) {
-        if (disposed) return;
+        if (error.aborted || lifecycle.disposed) return;
         renderRequestError(area, error, () => renderAdminProblemForm(container, context));
         return;
       }
-      if (disposed) return;
+      if (lifecycle.disposed) return;
     }
-    area.replaceChildren(buildForm(problem, isEdit, id, () => disposed));
+    area.replaceChildren(buildForm(problem, isEdit, id, () => lifecycle.disposed));
   })();
 
-  return () => {
-    disposed = true;
-  };
+  return () => lifecycle.dispose();
 }
 
 function buildForm(problem, isEdit, id, isDisposed) {

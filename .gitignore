@@ -41,6 +41,10 @@ tmp/
 *.tmp
 *.core
 
+# ===== 前端真实浏览器验证产物（playwright-cli） =====
+.playwright-cli/
+tests/frontend/browser/artifacts/
+
 # ===== 敏感配置 =====
 .env
 .env.*

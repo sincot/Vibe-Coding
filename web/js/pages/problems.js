@@ -1,9 +1,10 @@
-// 题目列表页（M1.7 基础版）：展示后端已提供的题目 ID、标题、难度与标签。
-// 不显示后端尚未提供的通过人数、本人 AC 状态等数据。
-// 覆盖加载中、空列表、加载失败三种状态。
+// 题目列表页（M1.7 基础版，M4.1 接入统一生命周期）：展示后端提供的题目
+// ID、标题、难度与标签。覆盖加载中、空列表、加载失败三种状态。
+// 页面切换时通过生命周期取消/忽略过期的读取响应。
 
 import { api } from "../api.js";
 import { isAdmin } from "../auth.js";
+import { ensureLifecycle } from "../lifecycle.js";
 import { navigate } from "../router.js";
 import {
   difficultyClass,
@@ -12,11 +13,12 @@ import {
   tagList,
 } from "../util.js";
 
-export async function renderProblems(container) {
+export function renderProblems(container, context = {}) {
   document.title = "题目列表 · OJ";
+  const lifecycle = ensureLifecycle(context.lifecycle);
   container.replaceChildren();
-  const listArea = h("div");
 
+  const listArea = h("div");
   container.appendChild(h("h1", { class: "page-title", text: "题目列表" }));
   container.appendChild(
     h("p", {
@@ -25,22 +27,31 @@ export async function renderProblems(container) {
     })
   );
   container.appendChild(listArea);
-  renderLoading(listArea);
 
-  let data;
-  try {
-    data = await api.get("/api/problems");
-  } catch (error) {
-    renderError(listArea, error.message || "加载失败");
-    return;
+  async function load() {
+    const token = lifecycle.next();
+    renderLoading(listArea);
+
+    let data;
+    try {
+      data = await api.get("/api/problems", { signal: lifecycle.signal });
+    } catch (error) {
+      if (error.aborted || !lifecycle.isCurrent(token)) return;
+      renderError(listArea, error, load);
+      return;
+    }
+    if (!lifecycle.isCurrent(token)) return;
+
+    const problems = data && Array.isArray(data.problems) ? data.problems : [];
+    if (problems.length === 0) {
+      renderEmpty(listArea);
+      return;
+    }
+    renderTable(listArea, problems);
   }
 
-  const problems = data && Array.isArray(data.problems) ? data.problems : [];
-  if (problems.length === 0) {
-    renderEmpty(listArea);
-    return;
-  }
-  renderTable(listArea, problems);
+  load();
+  return () => lifecycle.dispose();
 }
 
 function renderLoading(area) {
@@ -58,17 +69,20 @@ function renderEmpty(area) {
   );
 }
 
-function renderError(area, message) {
-  const retry = h("button", {
+function renderError(area, error, retry) {
+  const message = error.network
+    ? "网络连接失败，无法加载题目列表。"
+    : error.message || "加载失败";
+  const retryButton = h("button", {
     class: "btn btn-secondary",
     text: "重试",
     attrs: { type: "button" },
   });
-  retry.addEventListener("click", () => renderProblems(area.parentElement));
+  retryButton.addEventListener("click", retry);
   area.replaceChildren(
     h("div", { class: "card state" }, [
       h("div", { class: "alert alert-error", text: "题目加载失败：" + message }),
-      h("div", { attrs: { style: "margin-top:12px" } }, [retry]),
+      h("div", { attrs: { style: "margin-top:12px" } }, [retryButton]),
     ])
   );
 }

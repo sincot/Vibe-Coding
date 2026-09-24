@@ -25,28 +25,27 @@ export function adminSubNav(active) {
   ]);
 }
 
-// 统一的可读错误文案，不把所有 403 都解释为 token 失效。
+// 统一的可读错误文案，按状态码与业务标识分类，不把所有 403 都解释为 token 失效，
+// 也不依赖中文文案匹配（SPEC M4.1）。
 export function adminErrorMessage(error) {
   if (!error) return "请求失败。";
+  if (error.aborted) return "";
   if (error.network) {
     return "网络连接失败，无法确认后端是否已执行；请检查网络后自行确认，系统不会自动重试。";
   }
-  switch (error.status) {
-    case 401:
-      return "登录状态已失效，请重新登录。";
-    case 403:
-      return error.code === "PASSWORD_CHANGE_REQUIRED"
-        ? "请先完成首次改密后再使用后台功能。"
-        : "权限不足：当前账号已不具备后台管理权限。";
-    case 404:
-      return "记录不存在，或已被其他操作删除。";
-    case 409:
-      return error.message || "操作存在冲突，无法完成。";
-    case 413:
-      return "提交内容过大，请精简后重试。";
-    default:
-      return error.message || `请求失败（HTTP ${error.status || 0}）。`;
+  if (error.status === 401) return "登录状态已失效，请重新登录。";
+  if (error.status === 403) {
+    return error.code === "PASSWORD_CHANGE_REQUIRED"
+      ? "请先完成首次改密后再使用后台功能。"
+      : "权限不足：当前账号已不具备后台管理权限。";
   }
+  if (error.status === 404) return "记录不存在，或已被其他操作删除。";
+  if (error.status === 409) return error.message || "操作存在冲突，无法完成。";
+  if (error.status === 413) return "提交内容过大，请精简后重试。";
+  if (error.status === 429) return error.message || "操作过于频繁，请稍后再试。";
+  if (error.status === 503) return error.message || "服务暂时不可用，请稍后重试。";
+  if (error.status >= 500) return error.message || "服务器内部错误，请稍后重试。";
+  return error.message || `请求失败（HTTP ${error.status || 0}）。`;
 }
 
 // 刷新当前用户状态（角色/首改标记可能已被其它管理员修改）。

@@ -1,24 +1,21 @@
 // 登录页：使用 account（10 位数字账号或 admin）与 password 登录。
-// 成功后保存认证信息与用户状态；若后端标记需首次改密，则引导到改密页；
-// 否则回到登录前的目标页（redirect 参数）。
+// 成功后保存认证信息与用户状态；若后端标记需首次改密，则保留原目标并引导到
+// 改密页；否则返回登录前的目标页。
+//
+// 返回目标只接受经路由校验的站内地址；无效或无权目标回退到公开页面并说明原因，
+// 不接受外部 URL / 协议地址，避免开放重定向（SPEC M4.1）。
 
 import { api } from "../api.js";
 import { setAuth } from "../auth.js";
-import { renderNav } from "../nav.js";
-import { navigate } from "../router.js";
+import { peekPendingTarget } from "../storage.js";
+import { completePostAuthRedirect, navigate } from "../router.js";
 import { field, h, setBusy, setMessage } from "../util.js";
 
-function safeRedirect(value) {
-  if (!value) return "/problems";
-  const target = String(value);
-  if (!target.startsWith("/") || target.startsWith("//")) return "/problems";
-  return target;
-}
-
-export function renderLogin(container, context) {
+export function renderLogin(container, context = {}) {
   document.title = "登录 · OJ";
-  const accountParam = context.query.get("account") || "";
-  const redirect = context.query.get("redirect") || "";
+  const query = context.query || new URLSearchParams();
+  const accountParam = query.get("account") || "";
+  const redirect = query.get("redirect") || "";
 
   const account = h("input", {
     attrs: {
@@ -65,18 +62,21 @@ export function renderLogin(container, context) {
         { auth: false }
       );
       setAuth(result.token, result.user);
-      renderNav();
       if (result.user && result.user.reset_pwd_flag) {
-        navigate("/password");
-      } else {
-        navigate(safeRedirect(redirect));
+        // 保留原目标（若有），改密成功后再返回。
+        navigate("/password", { replace: true });
+        return;
       }
+      const pending = peekPendingTarget();
+      completePostAuthRedirect(pending || redirect);
     } catch (error) {
       setBusy(submit, false, null, "登录");
-      if (error.status === 429) {
+      if (error.isRateLimited && error.isRateLimited()) {
         setMessage(message, "warn", error.message || "登录尝试过于频繁，请稍后再试");
-      } else if (error.status === 401) {
+      } else if (error.isAuthInvalid && error.isAuthInvalid()) {
         setMessage(message, "error", "账号或密码错误");
+      } else if (error.aborted) {
+        /* 页面已切换，忽略 */
       } else {
         setMessage(message, "error", error.message || "登录失败");
       }

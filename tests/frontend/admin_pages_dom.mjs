@@ -55,6 +55,8 @@ globalThis.document = window.document;
 globalThis.location = window.location;
 globalThis.history = window.history;
 globalThis.localStorage = window.localStorage;
+// M4.1 起「登录后返回目标」使用 sessionStorage；jsdom 在 Node 下不会自动暴露，需显式绑定。
+globalThis.sessionStorage = window.sessionStorage;
 globalThis.fetch = (input, init) => {
   const url = typeof input === "string" ? new URL(input, BASE).toString() : input;
   return realFetch(url, init);
@@ -237,7 +239,9 @@ await scenario("S4 未改密管理员直访后台并完成首次改密", async (
   el("pwd-new").value = "AdminNewPass456";
   el("pwd-confirm").value = "AdminNewPass456";
   fireSubmit(q("#app form"));
-  await waitFor(() => hash() === "#/problems", { label: "password done" });
+  // M4.1：登录后若需强制改密，保留原目标，改密成功后返回原目标（此处为 /admin）。
+  await waitFor(() => hash() === "#/admin", { label: "password done (return to target)" });
+  check("首次改密后返回原目标 /admin", hash() === "#/admin", hash());
   const me = await api("GET", "/api/me", { token: ctx.adminToken });
   check("改密后 reset_pwd_flag 清除", me.data && me.data.reset_pwd_flag === 0, JSON.stringify(me.data));
   ctx.adminUser = me.data;

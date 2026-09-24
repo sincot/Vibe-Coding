@@ -386,14 +386,27 @@ Content-Type: application/json
 服务启动后，浏览器直接访问根路径即可打开前端（默认 <http://127.0.0.1:8080/>）：
 
 ```bash
+# 推荐：辅助脚本自动选择可用的判题 tmpfs 并在首次初始化时校验 admin 密码
 OJ_JWT_SECRET="$(openssl rand -hex 32)" OJ_ADMIN_PASSWORD='请改为强密码' \
-  ./build/oj_server --db data/oj.db
+  bash scripts/run_dev_server.sh
 # 浏览器打开 http://127.0.0.1:8080/
 ```
 
+也可手动启动（**注意**：判题工作目录必须为 tmpfs，否则服务启动即退出，退出码 1，
+端口转发后页面会空白/一直加载；本机 `/opt/oj-tmpfs` 未挂载时可设
+`OJ_JUDGE_WORKSPACE=/dev/shm` 或开发用 `OJ_JUDGE_ALLOW_NON_TMPFS=1`）：
+
+```bash
+OJ_JWT_SECRET="$(openssl rand -hex 32)" OJ_ADMIN_PASSWORD='请改为强密码' \
+  OJ_JUDGE_WORKSPACE=/dev/shm ./build/oj_server --db data/oj.db --web web
+# 启动后先自检：curl -sS --max-time 5 http://127.0.0.1:8080/api/health
+```
+
 - **静态托管**：cpp-httplib 仅把 `--web`（默认 `web/`）目录只读挂载到 URL 根路径 `/`，并处理目录下的 `index.html`。项目根目录、`data/oj.db`、`src/`、配置文件与判题临时目录都不在托管范围内；`..` 与 URL 编码的越界路径由路径校验拦截并返回 `404`（可自行验证：`curl -i --path-as-is http://127.0.0.1:8080/SPEC.md`、`/data/oj.db`、`/../SPEC.md`、`/%2e%2e/SPEC.md` 均为 `404`）。`/api/*` 路由与 `/api/health` 行为保持不变。
+- **启动排错**：若端口转发后页面空白/一直加载，先确认服务确在监听（`ss -ltnp | grep 8080`）且 `curl --max-time 5 http://127.0.0.1:8080/api/health` 返回 `{"status":"ok"}`。常见原因是服务未启动或启动失败：① 判题目录非 tmpfs（加 `OJ_JUDGE_WORKSPACE`）；② 首次初始化未设 `OJ_ADMIN_PASSWORD`。两者都会让 `oj_server` 以非零码退出。`scripts/run_dev_server.sh` 会提前报错并给出提示。
+- **请求超时**：`web/js/api.js` 对所有请求设 15s 上限（`DEFAULT_TIMEOUT_MS`，可用 `timeoutMs` 覆盖）。后端不可达或连接被接受却无响应时，界面会显示「请求超时/网络连接失败」并可重试，而不是永久停留在「加载中」；超时不会清除本地 token。
 - **无构建流程**：纯原生 HTML/CSS/ES Module，无打包器、无 React/Vue 等框架。本阶段源码编辑器为 `textarea`，CodeMirror 属 M4.3。
-- **hash 路由**：`#/problems`（列表）、`#/problems/{id}`（题目页）、`#/login`、`#/register`、`#/password`。游客可浏览公开题目；`#/password` 为受保护路由，未登录时重定向到登录页并携带 `redirect` 参数，登录成功后返回原目标页。
+- **hash 路由**：`#/problems`（列表）、`#/problems/{id}`（题目页）、`#/login`、`#/register`、`#/password`。游客可浏览公开题目；`#/password` 为受保护路由，未登录时重定向到登录页并携带 `redirect` 参数。返回目标的完整规则见「前端基础设施（M4.1）」——登录/注册/改密等流程页不作为返回目标，避免流程互相回跳。
 - **统一 API 封装**（`web/js/api.js`）：负责 JSON 序列化/解析、`Authorization: Bearer <token>`、HTTP 错误与网络异常归一化。token 保存在浏览器 `localStorage`，仅放入请求头，不进入 URL 或日志。
 - **认证行为**：身份失效（`401`）会清理本地凭证并跳转登录页（内部去重，避免并发请求重复跳转）；登录失败只显示表单错误；改密接口的「旧密码错误」按表单错误处理，不会误退出登录；后端返回 `code:"PASSWORD_CHANGE_REQUIRED"` 时引导到改密页。
 - **功能范围**：注册（成功显著展示系统分配的 10 位账号并引导用该账号登录，不依赖未实现的自动登录）、登录（保存 token 与用户状态、导航显示昵称、退出登录）、改密（沿用后端字段与密码规则，admin 首登强制引导）、题目列表（题目 ID/标题/难度/标签，含加载中、空列表、加载失败状态）、题目页（左侧题面+公开样例+难度标签+时空限制，右侧语言选择+`textarea`+提交+逐点结果）。退出登录只清理前端凭证，不声称已撤销后端 JWT。
@@ -503,6 +516,64 @@ OJ_JWT_SECRET="$(openssl rand -hex 32)" OJ_ADMIN_PASSWORD='请改为强密码' \
 > 页面验证使用真实服务 + jsdom 执行 `web/js` 模块，可重复运行脚本见 `tests/frontend/`
 > （可选、不注册 CTest；需外部安装 jsdom）；结果与回归见 `tests/M2.5-test-report.md`。
 > 真实图形浏览器渲染与手动点击仍属未验证项。
+
+### 前端基础设施（M4.1）
+
+在 M1.7/M2.5 已有前端基础上统一路由、身份状态、错误处理与登录回跳，未引入新框架或
+构建流程，也不再新增重复的路由或认证体系。相关模块：`web/js/router.js`（路由与访问
+条件）、`web/js/auth.js`（身份状态机与凭证）、`web/js/session.js`（`/api/me` 核实）、
+`web/js/api.js`（请求封装与错误分类）、`web/js/lifecycle.js`（页面生命周期）、
+`web/js/storage.js`（登录后返回目标）、`web/js/nav.js`（导航）。
+
+- **路由接入与访问条件**：全部已实现页面接入同一 hash 路由表——`#/problems`、
+  `#/problems/{id}`、`#/login`、`#/register`、`#/password`、`#/admin`、
+  `#/admin/problems`、`#/admin/problems/new`、`#/admin/problems/{id}/edit`、
+  `#/admin/problems/{id}/testcases`、`#/admin/users`、`#/admin/rejudge`（已保留 Rejudge
+  入口）。路由以 `access`（`public`/`auth`/`admin`）声明访问条件，由 `router.js` 统一
+  判定，页面不再各自分散判断。默认空 hash → `#/problems`；未知路由显示「页面不存在」；
+  非法路由参数/编码异常显示「地址参数无效」；直接打开带 hash 的地址、刷新与前进后退
+  均走同一套规则。提交历史（M4.4）与排行榜（M4.5）页面尚未实现，导航与页脚不提供
+  会进入空白页的入口。
+- **身份状态**：`auth.js` 区分 `unknown`（有 token 待核实）、`guest`、`authenticated`
+  三种状态。恢复会话时由 `session.js` 通过 `GET /api/me` 核实当前用户，**后台访问
+  权限依据服务端最新角色与 `reset_pwd_flag`，不凭本地保存的角色**；核实前导航不显示
+  后台入口或用户昵称，避免短暂错误展示。角色/首改状态经 `setUser` 更新后自动刷新导航
+  与路由判断。
+- **统一错误处理**：`api.js` 携带 `Authorization: Bearer <token>`、解析 JSON、归类
+  HTTP 与网络异常，并保留 `status`/`code`/`retryable` 供页面按接口约定分支（不依赖中文
+  文案匹配）。受保护请求 `401` 清理失效凭证并引导登录（去重）；登录失败 `401` 只显示
+  表单错误；改密旧密码错误 `401` 按表单错误处理、不退出登录；`403
+  PASSWORD_CHANGE_REQUIRED` 进入改密流程；普通 `403` 显示权限不足并在必要时刷新身份；
+  `404/409/429/503` 显示对应业务提示（如 `JUDGE_QUEUE_FULL` 不自动重试）；网络中断或
+  非预期响应恢复可操作状态并准确提示。并发 401 或改密要求只触发一次状态转换与跳转。
+- **登录后返回原目标**：未登录访问受保护页面时，目标路径经 `sanitizeTarget` 校验后存入
+  sessionStorage，并在登录页 `redirect` 参数中携带；登录成功后 `completePostAuthRedirect`
+  重新校验目标合法性**与当前用户权限**再跳转——只接受站内、可匹配路由且非流程页的地址，
+  拒绝外部 URL、`//` 协议地址与含反斜杠/控制字符/恶意编码的地址，避免开放重定向；普通
+  用户不会因目标指向后台而越权，无效/无权目标回退到 `#/problems` 并说明原因。登录/注册/
+  改密流程页不互相回跳。注册成功仍展示分配的 10 位账号，不改为自动登录。
+- **首次强制改密流程**：登录响应、`GET /api/me` 与后端 `403 PASSWORD_CHANGE_REQUIRED`
+  任一触发都进入同一改密流程。登录后若 `reset_pwd_flag=1`，保留原目标先到 `#/password`；
+  改密页本身允许该用户访问，不被路由守卫反复拦截；未完成改密的账号进入后台会被引导到
+  改密页。改密成功后回查 `/api/me` 刷新状态，再按当前权限返回原目标。沿用既有 JWT 策略：
+  改密不清除旧 token，界面不声称已撤销服务端 token。
+- **页面生命周期**：`router.js` 为每次渲染创建 `lifecycle`，切换页面时统一清理并中止
+  未完成的读取请求（`AbortController` / 过期响应丢弃），避免旧响应覆盖新页面、重复进入
+  累积监听或重复触发。**写请求（提交、Rejudge、增删改）不随页面切换取消**：前端停止
+  等待不等于后端已取消，继续沿用「网络失败时结果无法确认、不自动重试」的规则。退出
+  登录清理本地凭证、用户状态、待返回目标与受保护页面数据，并通过 `epoch` 丢弃退出前
+  发起、退出后才返回的旧请求，避免其恢复已退出的身份。
+- **范围与边界**：本轮仅做基础设施与已有页面的必要适配，未重做全站视觉，未提前实现
+  M4.2 完整题目列表、M4.3 CodeMirror、M4.4 提交历史与 M4.5 排行榜；对应导航入口保持
+  不提供。所有敏感操作仍依赖后端鉴权，前端检查仅用于页面体验。昵称、错误提示与接口
+  文本一律经 `textContent`/`<pre>` 纯文本渲染；token 不进入 URL、日志或错误提示；后台
+  敏感数据不新增浏览器持久化缓存。
+
+> 验证：逻辑层 `tests/frontend/m41_logic_test.mjs`（73 项）与页面级
+> `tests/frontend/m41_infrastructure_dom.mjs`（45 项，`run_m41.sh`）通过；真实浏览器
+> `tests/frontend/browser/`（`playwright-cli` + 真实 Chromium，桌面与 360×640/390×844/
+> 768×1024 窄视口，37 项）通过；M2.5 后台页面 DOM 回归 128 项通过。完整逐项结果见
+> `tests/M4.1-test-report.md`。Windows 有头复核脚本已就绪（本环境未执行）。
 
 ### 注册接口
 

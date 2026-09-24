@@ -1,11 +1,13 @@
 // 改密页：沿用后端字段 old_password / new_password 与密码规则。
-// 管理员首次登录（reset_pwd_flag=1）需在此完成改密后才能进行其他受限操作。
-// 改密不撤销后端已签发的 JWT；本页在成功后回查 /api/me 刷新本地用户状态。
+//
+// 管理员首次登录（reset_pwd_flag=1）或管理员重置密码后的用户需在此完成改密，
+// 之后才能继续受限操作。改密不撤销后端已签发的 JWT；本页在成功后回查 /api/me
+// 刷新本地用户状态，再按原目标/权限决定落点（SPEC M4.1）。
 
 import { api } from "../api.js";
 import { getUser, setUser } from "../auth.js";
-import { renderNav } from "../nav.js";
-import { navigate } from "../router.js";
+import { consumePendingTarget } from "../storage.js";
+import { completePostAuthRedirect } from "../router.js";
 import { field, h, setBusy, setMessage, showToast } from "../util.js";
 
 export function renderPassword(container) {
@@ -78,20 +80,23 @@ export function renderPassword(container) {
         // 旧密码错误的 401 属于表单错误，不应触发退出登录。
         { skipAuthRedirect: true }
       );
-      // 回查当前用户，刷新 reset_pwd_flag，使后续权限判断使用最新状态。
+      // 回查当前用户，按服务端实际角色/首改状态刷新，再决定返回目标。
       try {
         const me = await api.get("/api/me");
         setUser(me);
       } catch (error) {
         /* 回查失败不阻断：改密本身已成功 */
       }
-      renderNav();
+      const pending = consumePendingTarget();
       showToast("密码修改成功，可继续操作（后端 JWT 未撤销，仍按原策略有效）");
-      navigate("/problems");
+      completePostAuthRedirect(pending);
     } catch (error) {
       setBusy(submit, false, null, "修改密码");
-      if (error.status === 401) {
+      if (error.aborted) return;
+      if (error.isAuthInvalid && error.isAuthInvalid()) {
         setMessage(message, "error", "旧密码错误");
+      } else if (error.isPasswordChangeRequired && error.isPasswordChangeRequired()) {
+        setMessage(message, "error", "请使用当前登录密码重新提交");
       } else {
         setMessage(message, "error", error.message || "修改密码失败");
       }

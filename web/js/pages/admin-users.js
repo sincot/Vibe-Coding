@@ -5,6 +5,7 @@
 
 import { api } from "../api.js";
 import { getUser } from "../auth.js";
+import { ensureLifecycle } from "../lifecycle.js";
 import { navigate } from "../router.js";
 import {
   confirmDialog,
@@ -30,37 +31,38 @@ function roleText(role) {
   return role || "未知";
 }
 
-export function renderAdminUsers(container, context) {
+export function renderAdminUsers(container, context = {}) {
   const area = adminShell(container, {
     title: "用户管理",
     subtitle: "可重置密码与修改角色；不提供删除用户功能。",
     active: "users",
   });
 
-  const state = { page: parsePage(context.query.get("page")) };
+  const state = { page: parsePage((context.query || new URLSearchParams()).get("page")) };
 
   const listArea = h("div");
   area.appendChild(listArea);
 
-  let disposed = false;
-  let token = 0;
+  const lifecycle = ensureLifecycle(context.lifecycle);
 
   function updateQuery() {
     navigate("/admin/users" + (state.page > 1 ? "?page=" + state.page : ""));
   }
 
   async function load() {
-    const current = ++token;
+    const current = lifecycle.next();
     listArea.replaceChildren(loadingBlock("用户加载中…"));
     let data;
     try {
-      data = await api.get("/api/admin/users?page=" + state.page);
+      data = await api.get("/api/admin/users?page=" + state.page, {
+        signal: lifecycle.signal,
+      });
     } catch (error) {
-      if (disposed || current !== token) return;
+      if (error.aborted || !lifecycle.isCurrent(current)) return;
       renderRequestError(listArea, error, load);
       return;
     }
-    if (disposed || current !== token) return;
+    if (!lifecycle.isCurrent(current)) return;
 
     const users = data && Array.isArray(data.users) ? data.users : [];
     listArea.appendChild(
@@ -145,10 +147,7 @@ export function renderAdminUsers(container, context) {
   }
 
   load();
-  return () => {
-    disposed = true;
-    token++;
-  };
+  return () => lifecycle.dispose();
 }
 
 function buildTable(users, onReset, onRole) {

@@ -3,10 +3,13 @@
 //
 // 提交同步等待判题结果：请求期间禁用按钮并显示「判题中」，避免重复提交；
 // 请求失败时保留编辑器中的源码、恢复可操作状态且不自动重试。
+// 页面切换会取消未完成的题目读取；但提交是写请求，不随页面切换取消——
+// 前端停止等待不代表后端已取消，网络失败时结果无法确认、不自动重试。
 
 import { api } from "../api.js";
-import { getToken, requiresPasswordChange } from "../auth.js";
+import { isLoggedIn, requiresPasswordChange } from "../auth.js";
 import { renderJudgeResult } from "../judge.js";
+import { ensureLifecycle } from "../lifecycle.js";
 import { navigate } from "../router.js";
 import {
   difficultyClass,
@@ -19,8 +22,9 @@ import {
   tagList,
 } from "../util.js";
 
-export async function renderProblem(container, context) {
-  const id = context.params.id;
+export async function renderProblem(container, context = {}) {
+  const id = context.params ? context.params.id : "";
+  const lifecycle = ensureLifecycle(context.lifecycle);
   document.title = `题目 #${id} · OJ`;
   container.appendChild(
     h("div", { class: "state" }, [
@@ -31,8 +35,11 @@ export async function renderProblem(container, context) {
 
   let problem;
   try {
-    problem = await api.get("/api/problems/" + encodeURIComponent(id));
+    problem = await api.get("/api/problems/" + encodeURIComponent(id), {
+      signal: lifecycle.signal,
+    });
   } catch (error) {
+    if (error.aborted || lifecycle.disposed) return;
     container.replaceChildren();
     const back = h("button", {
       class: "btn btn-secondary",
@@ -40,28 +47,29 @@ export async function renderProblem(container, context) {
       attrs: { type: "button" },
     });
     back.addEventListener("click", () => navigate("/problems"));
+    let text;
+    if (error.status === 404) text = "题目不存在或你没有权限查看。";
+    else if (error.status === 400) text = "题目 ID 无效，请从题目列表进入。";
+    else if (error.network) text = "网络连接失败，请稍后重试。";
+    else text = "题目加载失败：" + (error.message || "未知错误");
     container.appendChild(
       h("div", { class: "card state" }, [
-        h("div", {
-          class: "alert alert-error",
-          text:
-            error.status === 404
-              ? "题目不存在或你没有权限查看。"
-              : "题目加载失败：" + (error.message || "未知错误"),
-        }),
+        h("div", { class: "alert alert-error", text }),
         h("div", { attrs: { style: "margin-top:12px" } }, [back]),
       ])
     );
     return;
   }
 
+  if (lifecycle.disposed) return;
   document.title = `${problem.title || "题目"} · OJ`;
   container.replaceChildren();
   const layout = h("div", { class: "problem-layout" }, [
     buildLeftPane(problem),
-    buildRightPane(problem),
+    buildRightPane(problem, lifecycle),
   ]);
   container.appendChild(layout);
+  return () => lifecycle.dispose();
 }
 
 function buildLeftPane(problem) {
@@ -111,8 +119,8 @@ function buildLeftPane(problem) {
   return h("section", { class: "pane" }, children);
 }
 
-function buildRightPane(problem) {
-  const loggedIn = getToken() !== "";
+function buildRightPane(problem, lifecycle) {
+  const loggedIn = isLoggedIn();
   const mustChangePassword = requiresPasswordChange();
 
   const language = h(
@@ -205,27 +213,36 @@ function buildRightPane(problem) {
         `/api/problems/${encodeURIComponent(problem.id)}/submit`,
         { language: language.value, code }
       );
+      // 页面已切换：结果已由后端保存，不再写入已分离的 DOM。
+      if (lifecycle.disposed) return;
       renderJudgeResult(resultArea, result);
       setMessage(message, "info", "");
     } catch (error) {
+      if (lifecycle.disposed) return;
       resultArea.replaceChildren();
-      if (error.network) {
+      if (error.aborted) {
+        /* 页面切换导致的取消，忽略 */
+      } else if (error.network) {
         setMessage(
           message,
           "warn",
           "网络中断，无法确认本次提交结果（后端可能已保存该提交）。源码已保留，请勿重复点击，稍后可自行确认；系统不会自动重试。"
         );
-      } else if (error.status === 403 && error.code === "PASSWORD_CHANGE_REQUIRED") {
+      } else if (error.isPasswordChangeRequired && error.isPasswordChangeRequired()) {
         setMessage(message, "warn", "请先修改密码后再提交。");
+      } else if (error.isUnavailable && error.isUnavailable()) {
+        setMessage(message, "warn", error.message || "判题服务暂时不可用，请稍后重试。");
       } else {
         setMessage(message, "error", error.message || "提交失败（源码已保留）");
       }
     } finally {
       submitting = false;
-      if (!(!loggedIn || mustChangePassword)) {
-        submit.disabled = false;
+      if (!lifecycle.disposed) {
+        if (!(!loggedIn || mustChangePassword)) {
+          submit.disabled = false;
+        }
+        submit.textContent = idleLabel;
       }
-      submit.textContent = idleLabel;
     }
   }
 
