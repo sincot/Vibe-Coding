@@ -1176,3 +1176,71 @@ pre.code-block {
   }
 }
 
+/* ---------- 提交历史与详情（M4.4） ---------- */
+.submissions-table .col-id,
+.submissions-table .col-time {
+  white-space: nowrap;
+}
+
+.submissions-table .col-title {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detail-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  font-size: 13px;
+}
+
+/* 只读源码：安全纯文本展示，保留原始换行，长源码可滚动，窄视口仍可阅读。 */
+.source-readonly-wrap {
+  margin: 10px 0 18px;
+}
+
+.source-readonly {
+  width: 100%;
+  min-height: 320px;
+  max-height: 560px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  tab-size: 4;
+  white-space: pre;
+  overflow: auto;
+  background: var(--surface-muted);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  resize: vertical;
+}
+
+.detail-admin {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.state-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+@media (max-width: 720px) {
+  .submissions-table .col-title {
+    max-width: none;
+  }
+
+  .source-readonly {
+    min-height: 260px;
+  }
+}
+
+

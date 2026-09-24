@@ -3,6 +3,7 @@
 #include <sys/socket.h>
 
 #include <chrono>
+#include <cctype>
 #include <filesystem>
 #include <utility>
 
@@ -322,6 +323,118 @@ json admin_user_summary_json(const UserSummary &user) {
   return j;
 }
 
+// 提交历史每页固定大小，沿用项目「每页 20 条」的分页习惯。
+constexpr int kSubmissionPageSize = 20;
+// page 允许的最大值，避免 (page-1)*page_size 偏移溢出。
+constexpr int kMaxSubmissionPage = 1000000;
+
+// 解析 page：空值默认 1，仅接受 [1, kMaxSubmissionPage] 的正十进制整数。
+bool parse_page_param(const std::string &text, int &out, std::string &error) {
+  const std::string trimmed = problem::trim_ascii(text);
+  if (trimmed.empty()) {
+    out = 1;
+    return true;
+  }
+  for (char c : trimmed) {
+    if (c < '0' || c > '9') {
+      error = "page 必须为正整数";
+      return false;
+    }
+  }
+  std::size_t begin = 0;
+  while (begin + 1 < trimmed.size() && trimmed[begin] == '0') {
+    ++begin;
+  }
+  const std::string digits = trimmed.substr(begin);
+  if (digits.size() > 7) {
+    error = "page 超出允许范围（最大 " + std::to_string(kMaxSubmissionPage) +
+            "）";
+    return false;
+  }
+  long long value = 0;
+  for (char c : digits) {
+    value = value * 10 + (c - '0');
+  }
+  if (value < 1) {
+    error = "page 必须为正整数";
+    return false;
+  }
+  if (value > kMaxSubmissionPage) {
+    error = "page 超出允许范围（最大 " + std::to_string(kMaxSubmissionPage) +
+            "）";
+    return false;
+  }
+  out = static_cast<int>(value);
+  return true;
+}
+
+// 规范化 mine 取值：仅接受表示「本人历史」的取值。使用 req.has_param("mine")
+// 判断参数是否出现，从而把 ?mine（空值）与未提供区分开；空值按本人历史处理。
+bool is_truthy_mine(const std::string &text) {
+  std::string value = problem::trim_ascii(text);
+  for (char &c : value) {
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
+  return value.empty() || value == "1" || value == "true" ||
+         value == "mine" || value == "yes";
+}
+
+// 提交历史列表条目 JSON：只含列表展示所需摘要，不含源码、逐点结果、编译信息与
+// WA 用例详情。memory_kb 为 0（未采集）时返回 null，不伪造成真实的 0。
+json submission_summary_json(const SubmissionSummary &item) {
+  json j;
+  j["id"] = item.id;
+  j["problem_id"] = item.problem_id;
+  j["problem_title"] = item.problem_title;
+  j["language"] = item.language;
+  j["status"] = item.status;
+  j["runtime_ms"] = item.runtime_ms;
+  j["memory_kb"] = item.memory_kb > 0 ? json(item.memory_kb) : json(nullptr);
+  j["created_at"] = item.created_at;
+  return j;
+}
+
+// 提交详情 JSON：只返回数据库保存的结果（源码/语言/状态/编译信息/逐点结果/
+// 运行指标/原提交时间），不重新判题、不按当前 testcases 重拼历史 WA、不虚构
+// 未持久化的编译耗时或旧版本结果。
+//
+// 逐点结果来源于持久化的 per_case：Rejudge 后展示的也是原记录当前保存的结果。
+// per_case 为空按「无逐点结果」处理；JSON 损坏时以 per_case_parse_error 明确
+// 标记为不可解析，绝不把异常记录显示为 AC 或正常空结果。
+json submission_detail_json(const SubmissionRecord &record,
+                            const std::string &problem_title) {
+  json body;
+  body["id"] = record.id;
+  body["problem_id"] = record.problem_id;
+  body["problem_title"] = problem_title;
+  body["language"] = record.language;
+  body["status"] = record.status;
+  body["source_code"] = record.source_code;
+  body["runtime_ms"] = record.runtime_ms;
+  body["memory_kb"] =
+      record.memory_kb > 0 ? json(record.memory_kb) : json(nullptr);
+  body["compile_output"] = record.compile_msg;
+  body["created_at"] = record.created_at;
+
+  bool parse_error = false;
+  json results = json::array();
+  if (!record.per_case.empty()) {
+    try {
+      json parsed = json::parse(record.per_case);
+      if (parsed.is_array()) {
+        results = std::move(parsed);
+      } else {
+        parse_error = true;
+      }
+    } catch (const std::exception &) {
+      parse_error = true;
+    }
+  }
+  body["results"] = std::move(results);
+  body["per_case_parse_error"] = parse_error;
+  return body;
+}
+
 } // namespace
 
 HttpServer::HttpServer(std::string host, int port, Database &db,
@@ -522,6 +635,23 @@ void HttpServer::setup_routes() {
             [this](const httplib::Request &req, httplib::Response &res) {
               handle_submit(req, res);
             });
+
+  // 本人提交历史 / 提交详情 / 本人题目状态（M4.4，均需登录）。历史接口始终只
+  // 返回当前登录用户的记录，身份只来自后端验证后的当前用户上下文；详情接口对
+  // 普通用户仅限本人记录、管理员按现有管理员权限可查看他人记录。详情路径用
+  // [^/]+ 匹配单个 ID 段，便于对非法 ID 返回明确的 400。
+  svr_.Get("/api/submissions", [this](const httplib::Request &req,
+                                      httplib::Response &res) {
+    handle_submission_list(req, res);
+  });
+  svr_.Get(R"(/api/submissions/([^/]+))",
+           [this](const httplib::Request &req, httplib::Response &res) {
+             handle_submission_detail(req, res);
+           });
+  svr_.Get("/api/status", [this](const httplib::Request &req,
+                                 httplib::Response &res) {
+    handle_user_status(req, res);
+  });
 
   // 管理员题目管理接口（M2.1）：建题 / 改题 / 删题。三者统一走
   // require_admin（登录 + 已完成首次改密 + 当前数据库角色为 admin）。
@@ -850,6 +980,28 @@ bool HttpServer::require_admin(const httplib::Request &req,
   // 角色与首次改密标记均取自数据库最新值（authenticate_request 已回查），
   // 不信任客户端提交的角色字段，也不依赖 JWT 中可能过时的角色。
   return enforce_admin(user, res);
+}
+
+bool HttpServer::require_login(const httplib::Request &req,
+                               httplib::Response &res, auth::AuthUser &user) {
+  std::string token;
+  if (!auth::extract_bearer_token(req.get_header_value("Authorization"), token)) {
+    send_error(res, 401, "未提供有效的认证信息");
+    return false;
+  }
+
+  std::string err;
+  switch (auth::authenticate_request(jwt_, user_store_, token, user, err)) {
+    case auth::AuthResult::Ok:
+      return true;
+    case auth::AuthResult::Unauthorized:
+      send_error(res, 401, "认证失败");
+      return false;
+    case auth::AuthResult::InternalError:
+      send_error(res, 500, "内部错误");
+      return false;
+  }
+  return false;
 }
 
 void HttpServer::handle_problem_list(const httplib::Request &req,
@@ -1217,6 +1369,164 @@ json HttpServer::submission_result_json(
     return json();
   }
   return body;
+}
+
+void HttpServer::handle_submission_list(const httplib::Request &req,
+                                        httplib::Response &res) {
+  auth::AuthUser user;
+  if (!require_login(req, res, user)) {
+    return;
+  }
+
+  // mine 参数解析：用 has_param 区分「未提供」与「?mine」（空值），避免空值被
+  // 误判为未提供。本接口只支持本人历史：无论是否携带 mine，都只返回当前用户记录，
+  // 绝不返回全体用户提交；客户端传入 user_id 等参数一律忽略。
+  if (req.has_param("mine")) {
+    if (!is_truthy_mine(req.get_param_value("mine"))) {
+      send_error(res, 400, "mine 取值非法：仅支持查看本人提交历史");
+      return;
+    }
+  } else {
+    log(LogLevel::Info,
+        "提交历史：未提供 mine 参数，默认返回当前用户本人历史（用户 " +
+            std::to_string(user.id) + "）");
+  }
+
+  int page = 1;
+  std::string param_error;
+  if (!parse_page_param(req.has_param("page") ? req.get_param_value("page") : "",
+                        page, param_error)) {
+    send_error(res, 400, param_error);
+    return;
+  }
+
+  // 可选按题目筛选（供题目页「本题提交」入口使用）。这是筛选条件而非身份，
+  // 身份仍只来自已验证的当前用户。
+  std::int64_t problem_filter = 0;
+  if (req.has_param("problem_id") &&
+      !parse_problem_id(req.get_param_value("problem_id"), problem_filter)) {
+    send_error(res, 400, "非法题目 ID");
+    return;
+  }
+
+  SubmissionStore submissions(db_);
+  std::vector<SubmissionSummary> items;
+  long long total = 0;
+  std::string err;
+  if (!submissions.list_by_user(user.id, problem_filter, page,
+                                kSubmissionPageSize, items, total, err)) {
+    log(LogLevel::Error, "提交历史查询失败（用户 " + std::to_string(user.id) +
+                             "）：" + err);
+    send_error(res, 500, "内部错误");
+    return;
+  }
+
+  json list = json::array();
+  for (const SubmissionSummary &item : items) {
+    list.push_back(submission_summary_json(item));
+  }
+  const long long total_pages =
+      total == 0 ? 0 : (total + kSubmissionPageSize - 1) / kSubmissionPageSize;
+  json body;
+  body["submissions"] = std::move(list);
+  body["page"] = page;
+  body["page_size"] = kSubmissionPageSize;
+  body["total"] = total;
+  body["total_pages"] = total_pages;
+  body["mine"] = true;
+  send_json(res, 200, body);
+}
+
+void HttpServer::handle_submission_detail(const httplib::Request &req,
+                                          httplib::Response &res) {
+  std::int64_t id = 0;
+  if (req.matches.size() < 2 || !parse_problem_id(req.matches[1].str(), id)) {
+    send_error(res, 400, "非法提交 ID");
+    return;
+  }
+
+  auth::AuthUser user;
+  if (!require_login(req, res, user)) {
+    return;
+  }
+
+  SubmissionStore submissions(db_);
+  bool found = false;
+  SubmissionRecord record;
+  std::string err;
+  if (!submissions.find_by_id(id, found, record, err)) {
+    log(LogLevel::Error, "提交详情查询失败 #" + std::to_string(id) + ": " + err);
+    send_error(res, 500, "内部错误");
+    return;
+  }
+
+  // 不存在与无权访问统一返回 404，避免通过状态码差异探测他人提交是否存在，也不
+  // 泄露他人源码/提交信息。管理员权限取自数据库最新角色与首改标记，不信客户端。
+  const bool is_admin = auth::check_admin(user) == auth::AdminCheck::Ok;
+  if (!found || (record.user_id != user.id && !is_admin)) {
+    send_error(res, 404, "提交记录不存在");
+    return;
+  }
+
+  // 题目标识：供详情展示与跳转；题目接口仍独立执行可见性检查，提交详情不下发
+  // 题面或隐藏用例，不能用于绕过题面权限。题目查询失败不阻断详情主体展示。
+  std::string problem_title;
+  bool problem_found = false;
+  ProblemRecord problem;
+  if (!problem_store_.find_by_id(record.problem_id, problem_found, problem,
+                                 err)) {
+    log(LogLevel::Error, "提交详情：题目查询失败 #" +
+                             std::to_string(record.problem_id) + ": " + err);
+    send_error(res, 500, "内部错误");
+    return;
+  }
+  if (problem_found) {
+    problem_title = problem.title;
+  }
+
+  send_json(res, 200, submission_detail_json(record, problem_title));
+}
+
+void HttpServer::handle_user_status(const httplib::Request &req,
+                                    httplib::Response &res) {
+  auth::AuthUser user;
+  if (!require_login(req, res, user)) {
+    return;
+  }
+
+  // 可选按题目筛选；身份固定为当前登录用户，客户端无法指定他人。
+  std::int64_t problem_filter = 0;
+  if (req.has_param("problem_id") &&
+      !parse_problem_id(req.get_param_value("problem_id"), problem_filter)) {
+    send_error(res, 400, "非法题目 ID");
+    return;
+  }
+
+  UserProblemStatusStore statuses(db_);
+  std::vector<UserStatusItem> items;
+  std::string err;
+  if (!statuses.list_by_user(user.id, problem_filter, items, err)) {
+    log(LogLevel::Error, "题目状态查询失败（用户 " + std::to_string(user.id) +
+                             "）：" + err);
+    send_error(res, 500, "内部错误");
+    return;
+  }
+
+  // 只返回本人已有的状态记录；无记录不在响应中出现，表示该题从未提交（前端据此
+  // 显示未 AC），而不是接口失败。不在此返回题目标题/题面等隐藏题目资料。
+  json list = json::array();
+  for (const UserStatusItem &item : items) {
+    json entry;
+    entry["problem_id"] = item.problem_id;
+    entry["status"] = item.accepted ? "accepted" : "none";
+    entry["first_ac_at"] =
+        item.has_first_ac_at ? json(item.first_ac_at) : json(nullptr);
+    entry["submit_count"] = item.submit_count;
+    list.push_back(std::move(entry));
+  }
+  json body;
+  body["statuses"] = std::move(list);
+  send_json(res, 200, body);
 }
 
 void HttpServer::handle_admin_create_problem(const httplib::Request &req,

@@ -70,6 +70,10 @@ export function renderNav() {
   }
 
   const links = h("div", { class: "nav-links" }, [navLink("题目列表", "/problems")]);
+  // 提交历史需登录；游客不显示会跳转登录的入口。
+  if (isLoggedIn()) {
+    links.appendChild(navLink("提交历史", "/submissions"));
+  }
   // 只有满足「已登录 + 已完成首次改密 + admin 角色」的账号显示管理入口。
   if (isAdmin()) {
     links.appendChild(navLink("管理后台", "/admin"));

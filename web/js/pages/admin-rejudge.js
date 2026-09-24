@@ -1,5 +1,5 @@
 // 后台重判页面：按提交 ID 发起重判，展示结果与诊断。
-// M4.4 完整提交历史尚未实现，因此本页仅提供最小可用的 ID 输入表单。
+// 提交历史/详情页（M4.4）已提供详情展示，成功重判后给出跳转入口。
 
 import { api } from "../api.js";
 import { renderJudgeResult } from "../judge.js";
@@ -102,6 +102,15 @@ export function renderAdminRejudge(container) {
       statusArea.replaceChildren();
       statusArea.appendChild(
         h("div", { class: "alert alert-success", text: "重判完成" })
+      );
+      statusArea.appendChild(
+        h("div", { class: "state-actions" }, [
+          h("a", {
+            class: "btn btn-secondary btn-sm",
+            text: "查看提交详情",
+            attrs: { href: "#/submissions/" + encodeURIComponent(String(id)) },
+          }),
+        ])
       );
       renderJudgeResult(resultArea, result);
       showToast("重判完成：" + (result.status || "未知"));

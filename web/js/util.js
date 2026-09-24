@@ -98,6 +98,13 @@ export function timeText(ms) {
   return `${ms} ms`;
 }
 
+// 语言展示名：仅映射后端已有的规范取值，未知值原样返回，不猜测。
+export function languageText(language) {
+  if (language === "cpp17") return "C++17";
+  if (language === "c11") return "C11";
+  return language ? String(language) : "未知语言";
+}
+
 // 统一的轻提示（不阻塞操作）。
 let toastTimer = null;
 export function showToast(message) {

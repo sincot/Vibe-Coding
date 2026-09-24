@@ -148,6 +148,19 @@ function buildLeftPane(problem, returnTarget) {
   if (statusEl) {
     updateSolvedStatus(statusEl, problem.solved);
     children.push(statusEl);
+    // 本题提交入口（M4.4）：链接到提交历史并按 problem_id 由后端筛选，而不是
+    // 仅筛选当前页数据；题目本身仍由题目接口执行可见性检查。
+    children.push(
+      h("a", {
+        class: "back-link",
+        text: "查看本题提交记录 →",
+        attrs: {
+          href:
+            "#/submissions?problem_id=" +
+            encodeURIComponent(String(problem.id)),
+        },
+      })
+    );
   }
 
   children.push(preBlock(problem.description || "", "problem-description"));

@@ -60,3 +60,25 @@ export function peekProblemsReturn() {
     return "";
   }
 }
+
+// 提交历史的返回目标：从历史列表进入提交详情时记录当前列表地址（含分页与题目
+// 筛选），详情页的「返回提交历史」据此恢复列表状态（M4.4）。仅保存在当前标签页，
+// 随刷新保留、关标签即弃；不使用 consume 语义，以便反复往返。
+const SUBMISSIONS_RETURN_KEY = "oj.submissionsReturn";
+
+export function saveSubmissionsReturn(target) {
+  if (!target) return;
+  try {
+    sessionStorage.setItem(SUBMISSIONS_RETURN_KEY, String(target));
+  } catch (error) {
+    /* sessionStorage 不可用时退化为默认历史地址 */
+  }
+}
+
+export function peekSubmissionsReturn() {
+  try {
+    return sessionStorage.getItem(SUBMISSIONS_RETURN_KEY) || "";
+  } catch (error) {
+    return "";
+  }
+}

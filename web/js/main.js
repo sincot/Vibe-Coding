@@ -10,6 +10,8 @@ import { ensureAuth, resetSessionVerification } from "./session.js";
 import { renderNav } from "./nav.js";
 import { renderProblem } from "./pages/problem.js";
 import { renderProblems } from "./pages/problems.js";
+import { renderSubmissionDetail } from "./pages/submission-detail.js";
+import { renderSubmissions } from "./pages/submissions.js";
 import { renderLogin } from "./pages/login.js";
 import { renderPassword } from "./pages/password.js";
 import { renderRegister } from "./pages/register.js";
@@ -56,6 +58,11 @@ addRoute("/login", renderLogin, { access: "public" });
 addRoute("/password", renderPassword, { access: "auth", allowDuringPasswordChange: true });
 addRoute("/problems", renderProblems, { access: "public" });
 addRoute("/problems/:id", renderProblem, { access: "public" });
+
+// 本人提交历史与提交详情（M4.4）：需登录；详情接口在后台再按本人/管理员权限
+// 二次校验，前端检查只用于页面体验。
+addRoute("/submissions", renderSubmissions, { access: "auth" });
+addRoute("/submissions/:id", renderSubmissionDetail, { access: "auth" });
 
 // 后台管理路由（仅管理员；前端检查身份/角色/首改状态，后端接口仍独立鉴权）。
 addRoute("/admin", renderAdminHome, { access: "admin" });

@@ -133,6 +133,8 @@ const char *const kIndexStatements[] = {
     "CREATE INDEX IF NOT EXISTS idx_testcases_problem_ord ON testcases(problem_id, ord);",
     // 提交历史：按用户 / 按题目查询
     "CREATE INDEX IF NOT EXISTS idx_submissions_user ON submissions(user_id);",
+    // 提交历史（M4.4）：按用户分页、最新优先（created_at DESC, id DESC）稳定排序
+    "CREATE INDEX IF NOT EXISTS idx_submissions_user_created ON submissions(user_id, created_at DESC, id DESC);",
     "CREATE INDEX IF NOT EXISTS idx_submissions_problem ON submissions(problem_id);",
     // 题目「通过人数」统计（按 problem_id 聚合）
     "CREATE INDEX IF NOT EXISTS idx_user_problem_status_problem ON user_problem_status(problem_id);",

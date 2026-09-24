@@ -108,6 +108,92 @@ bool SubmissionStore::update(const SubmissionRecord &record,
   return true;
 }
 
+bool SubmissionStore::list_by_user(std::int64_t user_id,
+                                   std::int64_t problem_id_filter, int page,
+                                   int page_size,
+                                   std::vector<SubmissionSummary> &out,
+                                   long long &out_total, std::string &error) {
+  out.clear();
+  out_total = 0;
+  if (page < 1) page = 1;
+  if (page_size < 1) page_size = 1;
+  const long long offset = static_cast<long long>(page - 1) * page_size;
+
+  const bool filtered = problem_id_filter > 0;
+  std::string where = " WHERE user_id = ?";
+  if (filtered) {
+    where += " AND problem_id = ?";
+  }
+
+  // 总数与列表使用完全相同的身份与筛选条件，保证 total 不因分页/额外条件漂移。
+  {
+    Statement stmt;
+    if (!db_.prepare("SELECT COUNT(*) FROM submissions" + where, stmt, error)) {
+      return false;
+    }
+    bool bound = stmt.bind(1, static_cast<sqlite3_int64>(user_id));
+    if (filtered) {
+      bound = bound &&
+              stmt.bind(2, static_cast<sqlite3_int64>(problem_id_filter));
+    }
+    if (!bound) {
+      error = stmt.errmsg();
+      return false;
+    }
+    int rc = stmt.step();
+    if (rc != SQLITE_ROW) {
+      error = stmt.errmsg();
+      return false;
+    }
+    out_total = stmt.column_int64(0);
+  }
+
+  // 只读取列表展示所需摘要字段，绝不加载 source_code / per_case / compile_msg。
+  // LEFT JOIN 关联题目标题；题目已删（正常不会发生）时标题为空，页面按缺失处理。
+  std::string sql =
+      "SELECT s.id, s.problem_id, COALESCE(p.title, ''), s.language, "
+      "s.status, s.runtime_ms, s.memory_kb, s.created_at FROM submissions s "
+      "LEFT JOIN problems p ON p.id = s.problem_id" +
+      where + " ORDER BY s.created_at DESC, s.id DESC LIMIT ? OFFSET ?";
+  Statement stmt;
+  if (!db_.prepare(sql, stmt, error)) {
+    return false;
+  }
+  int index = 1;
+  bool bound = stmt.bind(index++, static_cast<sqlite3_int64>(user_id));
+  if (filtered) {
+    bound = bound &&
+            stmt.bind(index++, static_cast<sqlite3_int64>(problem_id_filter));
+  }
+  bound = bound && stmt.bind(index++, page_size) &&
+          stmt.bind(index++, static_cast<sqlite3_int64>(offset));
+  if (!bound) {
+    error = stmt.errmsg();
+    return false;
+  }
+  while (true) {
+    int rc = stmt.step();
+    if (rc == SQLITE_ROW) {
+      SubmissionSummary item;
+      item.id = stmt.column_int64(0);
+      item.problem_id = stmt.column_int64(1);
+      item.problem_title = stmt.column_text(2);
+      item.language = stmt.column_text(3);
+      item.status = stmt.column_text(4);
+      item.runtime_ms = stmt.column_int64(5);
+      item.memory_kb = stmt.column_int64(6);
+      item.created_at = stmt.column_text(7);
+      out.push_back(std::move(item));
+      continue;
+    }
+    if (rc == SQLITE_DONE) {
+      return true;
+    }
+    error = stmt.errmsg();
+    return false;
+  }
+}
+
 bool UserProblemStatusStore::find(std::int64_t user_id,
                                   std::int64_t problem_id, bool &found,
                                   UserProblemStatusRecord &out,
@@ -260,6 +346,52 @@ bool UserProblemStatusStore::recompute(std::int64_t user_id,
 
   return upsert(user_id, problem_id, has_ac, has_ac, first_ac_at,
                 submit_count, error);
+}
+
+bool UserProblemStatusStore::list_by_user(
+    std::int64_t user_id, std::int64_t problem_id_filter,
+    std::vector<UserStatusItem> &out, std::string &error) {
+  out.clear();
+  const bool filtered = problem_id_filter > 0;
+  std::string sql =
+      "SELECT problem_id, status, first_ac_at, submit_count FROM "
+      "user_problem_status WHERE user_id = ?";
+  if (filtered) {
+    sql += " AND problem_id = ?";
+  }
+  sql += " ORDER BY problem_id ASC";
+
+  Statement stmt;
+  if (!db_.prepare(sql, stmt, error)) {
+    return false;
+  }
+  bool bound = stmt.bind(1, static_cast<sqlite3_int64>(user_id));
+  if (filtered) {
+    bound = bound &&
+            stmt.bind(2, static_cast<sqlite3_int64>(problem_id_filter));
+  }
+  if (!bound) {
+    error = stmt.errmsg();
+    return false;
+  }
+  while (true) {
+    int rc = stmt.step();
+    if (rc == SQLITE_ROW) {
+      UserStatusItem item;
+      item.problem_id = stmt.column_int64(0);
+      item.accepted = stmt.column_text(1) == "accepted";
+      item.has_first_ac_at = !stmt.column_is_null(2);
+      item.first_ac_at = item.has_first_ac_at ? stmt.column_text(2) : "";
+      item.submit_count = stmt.column_int(3);
+      out.push_back(std::move(item));
+      continue;
+    }
+    if (rc == SQLITE_DONE) {
+      return true;
+    }
+    error = stmt.errmsg();
+    return false;
+  }
 }
 
 } // namespace oj

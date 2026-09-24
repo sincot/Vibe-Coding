@@ -30,8 +30,9 @@
 - [x] M4.1 页面基础设施（统一 hash 路由与访问条件、`unknown`/`guest`/`authenticated` 身份状态机与 `/api/me` 核实、统一 API 错误分类与 401/首改跳转、登录后返回原目标、页面生命周期与请求取消、请求超时）
 - [x] M4.2 题目列表（`GET /api/problems` 搜索/难度/标签/可见性组合筛选 + 每页 20 条分页与紧凑页码范围 + 通过人数与本人 AC 状态 + 管理员隐藏题目标识与「全部/公开/隐藏」筛选 + 标签选项 `GET /api/problem-tags` + 查询条件承载于 hash 路由；功能已实现，待独立测试验证）
 - [x] M4.3 题目与做题页面（左题面/样例/限制/本人状态 + CDN CodeMirror 编辑器与 C/C++ 高亮、语言切换、`Ctrl+Enter` 提交 + 提交中/成功/失败状态与源码快照 + 全部逐点结果（状态/耗时/内存/原因）+ WA 输入/期望/实际输出 + 编译与诊断信息；已通过独立测试验证：后端 59 项断言 + 单元 4 用例、jsdom 54 项、真实 Chromium 28 项（含真实 CDN CodeMirror 高亮、ResizeObserver/refresh、窄视口单列、编辑器释放）、c8 前端覆盖率；全量回归 41/41。见 `tests/M4.3-test-report.md`）
+- [x] M4.4 提交历史与详情（`GET /api/submissions?mine` 本人历史分页（最新优先、可选题目筛选）+ `GET /api/submissions/{id}` 详情（本人/管理员）+ `GET /api/status` 本人题目状态；前端 `#/submissions`、`#/submissions/{id}` 与导航入口，复用 M4.3 结果组件，只读源码、管理员就地重判；已通过独立测试验证：后端单元 7 用例 + 集成 90 项断言、jsdom 31 项，全量回归 43/43，旧前端回归 313/313。见 `tests/M4.4-test-report.md`）
 
-后续阶段（提交历史/排行榜页面）尚未实现。
+后续阶段（排行榜页面）尚未实现。
 
 ## 环境要求
 
@@ -529,14 +530,15 @@ OJ_JWT_SECRET="$(openssl rand -hex 32)" OJ_ADMIN_PASSWORD='请改为强密码' \
 `web/js/storage.js`（登录后返回目标）、`web/js/nav.js`（导航）。
 
 - **路由接入与访问条件**：全部已实现页面接入同一 hash 路由表——`#/problems`、
-  `#/problems/{id}`、`#/login`、`#/register`、`#/password`、`#/admin`、
-  `#/admin/problems`、`#/admin/problems/new`、`#/admin/problems/{id}/edit`、
-  `#/admin/problems/{id}/testcases`、`#/admin/users`、`#/admin/rejudge`（已保留 Rejudge
-  入口）。路由以 `access`（`public`/`auth`/`admin`）声明访问条件，由 `router.js` 统一
-  判定，页面不再各自分散判断。默认空 hash → `#/problems`；未知路由显示「页面不存在」；
-  非法路由参数/编码异常显示「地址参数无效」；直接打开带 hash 的地址、刷新与前进后退
-  均走同一套规则。提交历史（M4.4）与排行榜（M4.5）页面尚未实现，导航与页脚不提供
-  会进入空白页的入口。
+  `#/problems/{id}`、`#/submissions`、`#/submissions/{id}`、`#/login`、`#/register`、
+  `#/password`、`#/admin`、`#/admin/problems`、`#/admin/problems/new`、
+  `#/admin/problems/{id}/edit`、`#/admin/problems/{id}/testcases`、`#/admin/users`、
+  `#/admin/rejudge`（已保留 Rejudge 入口）。路由以 `access`（`public`/`auth`/`admin`）声明
+  访问条件，由 `router.js` 统一判定，页面不再各自分散判断。默认空 hash → `#/problems`；
+  未知路由显示「页面不存在」；非法路由参数/编码异常显示「地址参数无效」；直接打开带 hash
+  的地址、刷新与前进后退均走同一套规则。提交历史页（M4.4）已在后续阶段接入导航与路由
+  （见「提交历史与详情页（M4.4）」）；排行榜（M4.5）尚未实现，导航与页脚不提供会进入
+  空白页的入口。
 - **身份状态**：`auth.js` 区分 `unknown`（有 token 待核实）、`guest`、`authenticated`
   三种状态。恢复会话时由 `session.js` 通过 `GET /api/me` 核实当前用户，**后台访问
   权限依据服务端最新角色与 `reset_pwd_flag`，不凭本地保存的角色**；核实前导航不显示
@@ -567,10 +569,10 @@ OJ_JWT_SECRET="$(openssl rand -hex 32)" OJ_ADMIN_PASSWORD='请改为强密码' \
   登录清理本地凭证、用户状态、待返回目标与受保护页面数据，并通过 `epoch` 丢弃退出前
   发起、退出后才返回的旧请求，避免其恢复已退出的身份。
 - **范围与边界**：本轮仅做基础设施与已有页面的必要适配，未重做全站视觉，未提前实现
-  M4.2 完整题目列表、M4.3 CodeMirror、M4.4 提交历史与 M4.5 排行榜；对应导航入口保持
-  不提供。所有敏感操作仍依赖后端鉴权，前端检查仅用于页面体验。昵称、错误提示与接口
-  文本一律经 `textContent`/`<pre>` 纯文本渲染；token 不进入 URL、日志或错误提示；后台
-  敏感数据不新增浏览器持久化缓存。
+  M4.2 完整题目列表、M4.3 CodeMirror、M4.4 提交历史与 M4.5 排行榜（其中 M4.2～M4.4
+  已在后续阶段分别实现）；对应导航入口在不具备时保持不提供。所有敏感操作仍依赖后端
+  鉴权，前端检查仅用于页面体验。昵称、错误提示与接口文本一律经 `textContent`/`<pre>`
+  纯文本渲染；token 不进入 URL、日志或错误提示；后台敏感数据不新增浏览器持久化缓存。
 
 > 验证：逻辑层 `tests/frontend/m41_logic_test.mjs`（73 项）与页面级
 > `tests/frontend/m41_infrastructure_dom.mjs`（45 项，`run_m41.sh`）通过；真实浏览器
@@ -664,6 +666,51 @@ OJ_JWT_SECRET="$(openssl rand -hex 32)" OJ_ADMIN_PASSWORD='请改为强密码' \
 - **范围**：本轮不实现 M4.4 完整提交历史/`GET /api/status` 与 M4.5 排行榜，不改写
   判题分类/统计/崩溃恢复规则；未额外持久化草稿、隐藏用例或诊断数据。本页不预加载
   隐藏用例、不请求管理员用例接口。
+
+### 提交历史与详情页（M4.4）
+
+在 M4.1～M4.3 基础上新增本人提交历史页 `#/submissions` 与提交详情页
+`#/submissions/{id}`，并接入顶部导航（登录后显示「提交历史」）。页面实现位于
+`web/js/pages/submissions.js`（历史）与 `web/js/pages/submission-detail.js`（详情），
+复用 M4.1 的路由/身份/错误处理/生命周期与 M4.3 的 `renderJudgeResult` 结果组件，
+未引入构建流程或前端框架。
+
+- **历史列表**：调用 `GET /api/submissions?mine`，展示提交 ID、题目、语言、状态、
+  耗时、内存与提交时间；不含源码、逐点结果或 WA 用例详情。分页沿用「每页 20 条」
+  与紧凑页码，查询条件（`page`、`problem_id`）承载于 hash 路由查询串，刷新与前进
+  后退可恢复；超出末页自动修正。点击提交 ID 进入详情，点击标题进入题目页（题目页
+  仍由题目接口独立执行可见性检查，隐藏题目不会因历史链接而绕过）。
+- **本题提交入口**：题目页（登录用户）提供「查看本题提交记录 →」，跳转到
+  `#/submissions?problem_id=N`；后端按该题目筛选本人全部提交（不是仅筛选当前页），
+  空结果给出明确提示与返回入口。
+- **详情**：调用 `GET /api/submissions/{id}`，展示数据库保存的完整源码、语言、
+  总体状态、编译信息、逐点结果、运行指标与原提交时间。源码使用**只读文本区域**
+  （`textarea[readonly]`，纯文本、保留换行、可滚动），本页不提供提交入口，浏览历史
+  不会误提交代码。未持久化的指标（如编译耗时）显示「未采集」，不把 `null` 显示为
+  `0`。逐点结果 JSON 损坏时以 `per_case_parse_error` 明确标记，不伪装成 AC 或正常
+  空结果。管理员额外显示「重判此提交」，成功后重新读取详情与该题状态，失败时按既有
+  策略保留原结果展示。
+- **本人题目状态**：详情页与 `GET /api/status?problem_id=N` 合并展示本人该题当前
+  状态（已 AC/未 AC、提交次数、首次 AC 时间）；无状态记录表示从未提交，按未 AC
+  显示，不由前端创造状态行。已有页面（题目列表/题目页）继续使用各自响应内的
+  `solved`，不额外重复发起状态查询，保持 M4.2/M4.3 兼容。
+- **状态与一致性**：提供加载中、无历史、无权访问/不存在、读取失败状态；快速翻页或
+  切换详情时按代次丢弃旧响应，旧结果不覆盖新页面；退出登录/身份变化时清除受保护
+  内容（`subscribeAuth` + 路由重渲染），避免用户切换后残留他人数据。
+- **身份与可见性规则（本次确定）**：本人提交历史、提交详情（含当时返回并保存的
+  WA 对比）与本人题目状态属于用户自身数据，**不因题目后来隐藏而收回**；但题目本身
+  （题面、公开样例、当前隐藏用例）仍完全按题目可见性规则控制，历史/状态接口不下发
+  题面或隐藏用例，历史中的题目链接仍走题目接口的可见性检查。管理员按现有管理员
+  权限（已登录 + 已完成首次改密 + 当前数据库角色为 admin）可查看任意提交详情。
+- **范围**：不进入 M4.5 排行榜，不新增源码编辑后重提、批量重判、结果版本历史或导出；
+  在途任务不进入提交历史（沿用 M3.7：独立 `in_flight_tasks` 表，结算后才写入
+  `submissions`），未新增状态枚举、未改变恢复结算规则。
+
+> **已通过独立测试验证**：后端单元 `tests/unit/test_m44_submission_history_unit.cpp`
+> （7 用例）与集成 `tests/integration/test_m44_history_api.cpp`（90 项断言）、页面级
+> `tests/frontend/m44_history_dom.mjs` + `run_m44.sh`（jsdom，31 项）；全量常规回归
+> `ctest --parallel 1` 43/43，旧前端回归 M4.1 78/78 + 53/53、M2.5 128/128、M4.3 54/54。
+> 完整逐项结果见 `tests/M4.4-test-report.md`。
 
 ### 注册接口
 
@@ -934,7 +981,7 @@ curl -i http://127.0.0.1:8080/api/problems/1
 
 > `solved` 是 M4.3 详情页本人状态的最小读取能力，与列表接口的 `solved` 同源，
 > 不使用「列表第一页是否包含该题」等推断方式；游客不返回该字段。完整做题状态
-> 接口（`GET /api/status`）属 M4.4，本阶段不提前实现。
+> 接口 `GET /api/status` 已随 M4.4 提供（见「本人题目状态接口（M4.4）」）。
 
 ### 题目可见性
 
@@ -1443,6 +1490,98 @@ curl -i -X POST http://127.0.0.1:8080/api/problems/1/submit \
 > **安全边界（重要）**：自 M3.3 起判题在进程级沙箱中执行（tmpfs 随机目录 +
 > 命名空间/chroot + setrlimit/RSS 限制 + seccomp），自 M3.4 起默认全开 ASan/UBSan
 > 并完成统一异常分类；Rejudge 属 M3.6。受控样例通过不代表可安全公开运行任意不可信代码。
+
+### 本人提交历史接口（M4.4）
+
+`GET /api/submissions?mine`（需登录），返回当前登录用户的提交历史摘要，按
+`created_at DESC, id DESC` 稳定排序（最新优先）。支持可选参数 `page`（默认 1）、
+`problem_id`（仅返回该题目的提交）。
+
+```bash
+curl -i 'http://127.0.0.1:8080/api/submissions?mine' \
+  -H 'Authorization: Bearer <token>'
+```
+
+成功响应（`200`）：
+
+```json
+{"submissions":[{"id":12,"problem_id":1,"problem_title":"A+B Problem",
+  "language":"cpp17","status":"AC","runtime_ms":18,"memory_kb":8420,
+  "created_at":"2026-09-21 12:00:00"}],
+ "page":1,"page_size":20,"total":1,"total_pages":1,"mine":true}
+```
+
+- **身份**：只来自后端验证后的当前用户（token + 按 `sub` 回查），客户端传入的
+  `user_id` 等参数一律忽略；无论是否携带 `mine`，都只返回本人记录，**绝不返回全体
+  用户提交**。`mine` 以「参数是否出现」判断（`?mine` 空值按本人历史处理），未提供时
+  默认返回本人历史并记录运行日志；显式传入非法 `mine` 取值（如 `mine=0`）返回 `400`。
+- **摘要范围**：仅提交 ID、题目 ID、题目标题、语言、状态、耗时、内存与原提交时间；
+  不含源码、逐点结果 JSON、编译信息或 WA 用例详情。
+- `runtime_ms`/`memory_kb` 口径与提交接口一致；`memory_kb` 未采集时为 `null`。
+- **分页**：列表与总数使用完全相同的身份与筛选条件；每页固定 20，`page` 非法返回
+  `400`，超出上限明确拒绝；按 `(user_id, created_at DESC, id DESC)` 建索引。
+- **只读**：读取接口不修改提交、计数或做题状态。在途任务不进入历史（沿用 M3.7：
+  结算后才写入 `submissions`），未新增状态枚举。
+- 未登录 / 无效 token `401`；内部故障 `500`。查询参数错误 `400`。
+
+### 提交详情接口（M4.4）
+
+`GET /api/submissions/{id}`（需登录），返回数据库保存的完整源码与判题结果。
+
+```bash
+curl -i http://127.0.0.1:8080/api/submissions/12 \
+  -H 'Authorization: Bearer <token>'
+```
+
+成功响应（`200`）：
+
+```json
+{"id":12,"problem_id":1,"problem_title":"A+B Problem","language":"cpp17",
+ "status":"AC","source_code":"...","runtime_ms":18,"memory_kb":8420,
+ "compile_output":"","created_at":"2026-09-21 12:00:00",
+ "results":[{"index":0,"status":"AC","time_ms":3,"memory_kb":8000}],
+ "per_case_parse_error":false}
+```
+
+- **权限**：普通用户只允许查看本人记录；管理员（已登录 + 已完成首次改密 + 当前
+  数据库角色为 `admin`，每次按数据库最新值判定）可查看任意记录。不存在的记录与
+  无权访问统一返回 `404`，不通过错误响应泄露他人源码或提交信息。
+- **数据来源**：全部来自 `submissions` 保存结果，**不重新判题、不按当前 testcases
+  重拼历史 WA**。Rejudge 后展示原记录当前保存的结果；不虚构未持久化的编译耗时或旧
+  版本结果。未持久化的指标（如 `compile_time_ms`）在响应中省略，前端显示「未采集」，
+  不将 `null` 显示为真实的 `0`。
+- **逐点结果**：复用提交响应的逐点结构（`results`）；`WA` 点附保存的输入/期望输出/
+  实际输出，通过点不额外附带隐藏输入或标准答案。`per_case` 为空按「无逐点结果」
+  处理；JSON 损坏时 `per_case_parse_error` 为 `true` 并返回空 `results`，明确标记
+  不可解析，**不把异常记录显示为 AC 或正常空结果**。
+- **题目标识**：返回 `problem_id`/`problem_title` 供展示与跳转；题目接口仍独立执行
+  可见性检查，本接口不下发题面或隐藏用例。
+- 非法 ID `400`；未登录 / 无效 token `401`；不存在 / 无权访问 `404`；内部故障 `500`。
+
+### 本人题目状态接口（M4.4）
+
+`GET /api/status`（需登录），返回当前用户的 `user_problem_status` 记录，按
+`problem_id` 升序。支持可选参数 `problem_id`（仅返回该题状态）。
+
+```bash
+curl -i 'http://127.0.0.1:8080/api/status?problem_id=1' \
+  -H 'Authorization: Bearer <token>'
+```
+
+成功响应（`200`）：
+
+```json
+{"statuses":[{"problem_id":1,"status":"accepted",
+  "first_ac_at":"2026-09-21 12:00:00","submit_count":2}]}
+```
+
+- 字段沿用既有约定：`status` 为 `accepted`/`none`，另含 `first_ac_at`（无则为
+  `null`）与 `submit_count`。仅返回当前用户已有记录，客户端不能指定他人身份。
+- **无记录不等于接口失败**：未提交的题目不出现在 `statuses` 中，表示该题从未提交、
+  按未 AC 显示；接口不会为未提交题目创造状态行。
+- 范围依据已确认的历史访问规则：状态属用户自身数据，本人对已提交题目的状态不因题目
+  后来隐藏而收回；本接口不返回题目标题/题面等隐藏题目资料。
+- 非法 `problem_id` `400`；未登录 / 无效 token `401`；内部故障 `500`。
 
 ### 判题任务调度（M3.1）
 

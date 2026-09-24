@@ -249,7 +249,13 @@ await scenario("M41-7 导航按认证状态渲染且不提供未实现入口", a
   check("登录后显示昵称", navText.includes(ctx.adminUser.nickname), navText);
   check("管理员显示后台入口", /管理后台/.test(navText), navText);
   check("不提供排行榜空白入口", !/排行榜/.test(navText), navText);
-  check("不提供提交历史空白入口", !/提交历史/.test(navText), navText);
+  // M4.4：提交历史页面已实现并接入导航，不再是「未实现入口」。
+  check("登录后显示已实现的提交历史入口", /提交历史/.test(navText), navText);
+  check(
+    "提交历史入口指向已注册路由",
+    !!q("#site-nav a[href='#/submissions']"),
+    navText
+  );
   clearDomAuth();
 });
 

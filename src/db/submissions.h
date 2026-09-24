@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace oj {
 
@@ -26,6 +27,31 @@ struct SubmissionRecord {
   std::string created_at; // UTC "YYYY-MM-DD HH:MM:SS"，与提交时间同口径
 };
 
+// 提交历史列表条目（M4.4）：仅含列表展示所需摘要，不含源码、逐点结果 JSON、
+// 编译信息与 WA 用例详情。problem_title 由 submissions LEFT JOIN problems 得到，
+// 供历史列表展示必要题目标识（题目本身仍由题目接口执行可见性检查）。
+struct SubmissionSummary {
+  std::int64_t id = 0;
+  std::int64_t problem_id = 0;
+  std::string problem_title;
+  std::string language; // 规范语言名："cpp17" / "c11"
+  std::string status;   // AC|WA|CE|TLE|RE|MLE|SYSERR
+  long long runtime_ms = 0;
+  long long memory_kb = 0; // 0 表示「未采集」，对外响应以 null 表示
+  std::string created_at;  // 原提交时间（UTC），Rejudge 不改写
+};
+
+// 一条用户题目状态记录（M4.4 /api/status）：字段沿用 user_problem_status 的
+// accepted/none、first_ac_at、submit_count 约定。无记录不在此返回，表示该题
+// 从未提交（前端据此显示未 AC），而不是接口失败。
+struct UserStatusItem {
+  std::int64_t problem_id = 0;
+  bool accepted = false;
+  bool has_first_ac_at = false;
+  std::string first_ac_at;
+  int submit_count = 0;
+};
+
 // submissions 表的写入与读取。所有语句使用参数绑定，不拼接外部输入。
 //
 // 写入方法不自行开启事务：调用方（提交服务）在同一个短事务内完成提交记录写入与
@@ -41,6 +67,16 @@ public:
   // 按 ID 查询提交记录。返回 true 表示查询过程正常，found 指示是否存在。
   bool find_by_id(std::int64_t id, bool &found, SubmissionRecord &out,
                   std::string &error);
+
+  // 分页查询某用户的提交历史摘要（M4.4），按 created_at DESC, id DESC 稳定排序
+  // （最新优先）。user_id 必须来自已验证的当前身份，不接受客户端指定。
+  // problem_id_filter 为 0 表示不过滤；>0 时仅返回该题目的提交。列表与总数使用
+  // 完全相同的身份与筛选条件。只读取摘要字段，不加载源码与逐点 JSON。
+  // 返回 true 表示查询正常；false 表示数据库错误（error 非空）。
+  bool list_by_user(std::int64_t user_id, std::int64_t problem_id_filter,
+                    int page, int page_size,
+                    std::vector<SubmissionSummary> &out, long long &out_total,
+                    std::string &error);
 
   // 更新已有提交记录的结果字段（status/per_case/compile_msg/runtime_ms/memory_kb）。
   // 保留 id、user_id、problem_id、language、source_code、created_at 不变；
@@ -82,6 +118,12 @@ public:
   //   - submit_count 保持原值不变（若原无记录，则按实际提交次数初始化）。
   bool recompute(std::int64_t user_id, std::int64_t problem_id,
                  std::string &error);
+
+  // 列出某用户的全部题目状态（M4.4 /api/status），按 problem_id 升序稳定排序。
+  // problem_id_filter 为 0 表示全部，>0 时仅返回该题；仅读取，不创建状态行。
+  // user_id 必须来自已验证身份。返回 true 表示查询正常。
+  bool list_by_user(std::int64_t user_id, std::int64_t problem_id_filter,
+                    std::vector<UserStatusItem> &out, std::string &error);
 
 private:
   Database &db_;

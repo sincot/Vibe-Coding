@@ -582,3 +582,25 @@ add_executable(oj_m43_problem_page_api_test
 target_link_libraries(oj_m43_problem_page_api_test PRIVATE oj_core)
 
 add_test(NAME m43_problem_page_api COMMAND oj_m43_problem_page_api_test)
+
+# M4.4 提交历史与本人状态读取（数据层）单元测试（gtest）：SubmissionStore::list_by_user
+# 的分页/最新优先/用户隔离/题目筛选/摘要字段，以及 UserProblemStatusStore::list_by_user
+# 的排序/字段/筛选/隔离（隔离临时文件库）。
+add_executable(oj_m44_history_unit
+  tests/unit/test_m44_submission_history_unit.cpp
+)
+
+target_link_libraries(oj_m44_history_unit PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME m44_history_unit COMMAND oj_m44_history_unit)
+
+# M4.4 提交历史 / 提交详情 / 本人题目状态后端接口集成测试（隔离临时库 + 随机端口）：
+# 仅本人历史与身份不可指定、mine 解析、分页与参数校验、题目筛选；详情本人/管理员/
+# 首改/越权/非法 ID/损坏 per_case/更新后保存结果/隐藏题可见性；本人状态字段与隔离。
+add_executable(oj_m44_history_api_test
+  tests/integration/test_m44_history_api.cpp
+)
+
+target_link_libraries(oj_m44_history_api_test PRIVATE oj_core)
+
+add_test(NAME m44_history_api COMMAND oj_m44_history_api_test)

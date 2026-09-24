@@ -116,6 +116,16 @@ private:
   void handle_problem_detail(const httplib::Request &req,
                              httplib::Response &res);
   void handle_submit(const httplib::Request &req, httplib::Response &res);
+  // 本人提交历史（M4.4）：仅返回当前登录用户的提交摘要，按最新优先分页排序。
+  // 身份来自后端验证后的当前用户，不接受客户端指定 user_id；始终只返回本人记录。
+  void handle_submission_list(const httplib::Request &req,
+                              httplib::Response &res);
+  // 提交详情（M4.4）：普通用户仅限本人记录，管理员按现有权限可查看他人记录。
+  // 非法/不存在/无权访问统一按既有约定处理，不通过错误响应泄露他人提交信息。
+  void handle_submission_detail(const httplib::Request &req,
+                                httplib::Response &res);
+  // 本人题目状态（M4.4）：仅返回当前用户的 user_problem_status，无记录表示未提交。
+  void handle_user_status(const httplib::Request &req, httplib::Response &res);
   void handle_admin_create_problem(const httplib::Request &req,
                                    httplib::Response &res);
   void handle_admin_update_problem(const httplib::Request &req,
@@ -143,6 +153,12 @@ private:
   // 之后再执行 enforce_admin（已登录 + 已完成首次改密 + admin 角色）。任一失败
   // 时已写入响应并返回 false，调用方直接返回。所有管理员接口统一复用本方法。
   bool require_admin(const httplib::Request &req, httplib::Response &res,
+                     auth::AuthUser &user);
+
+  // 仅校验登录（Bearer token 验证 + 按 sub 回查数据库），成功时填充 user。
+  // 用于提交历史/详情/状态等只读取本人数据的接口：身份只来自后端验证，
+  // 不接受客户端传入的 user_id 等字段。
+  bool require_login(const httplib::Request &req, httplib::Response &res,
                      auth::AuthUser &user);
 
   // 解析可选的访问者身份：未携带 Authorization 头时视为游客；携带时复用已有
