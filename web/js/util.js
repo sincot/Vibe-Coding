@@ -94,7 +94,7 @@ export function memoryText(kb) {
 }
 
 export function timeText(ms) {
-  if (ms === null || ms === undefined) return "—";
+  if (ms === null || ms === undefined) return "未采集";
   return `${ms} ms`;
 }
 

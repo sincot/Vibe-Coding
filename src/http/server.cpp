@@ -267,8 +267,11 @@ json problem_summary_json(const ProblemSummary &problem,
 }
 
 // 详情 JSON：只含元数据与公开样例，绝不包含隐藏用例。
+// viewer_authenticated 为 true 时附带本人对该题的 AC 状态（solved）；
+// 游客不附带该字段，避免把「本人状态」伪装给未登录访问者。
 json problem_detail_json(const ProblemRecord &problem,
-                         const std::vector<SampleCase> &samples) {
+                         const std::vector<SampleCase> &samples,
+                         bool viewer_authenticated, bool solved) {
   json j;
   j["id"] = problem.id;
   j["title"] = problem.title;
@@ -278,6 +281,9 @@ json problem_detail_json(const ProblemRecord &problem,
   j["time_limit_ms"] = problem.time_limit_ms;
   j["memory_limit_kb"] = problem.memory_limit_kb;
   j["visible"] = problem.visible;
+  if (viewer_authenticated) {
+    j["solved"] = solved;
+  }
   json sample_array = json::array();
   for (const SampleCase &sample : samples) {
     json item;
@@ -985,7 +991,18 @@ void HttpServer::handle_problem_detail(const httplib::Request &req,
     return;
   }
 
-  send_json(res, 200, problem_detail_json(problem, samples));
+  // 本人该题 AC 状态：仅对有已验证身份的用户读取，用户 ID 取自当前上下文，
+  // 不接受客户端指定；游客不查询、响应中也不含该字段。
+  bool solved = false;
+  if (viewer.authenticated &&
+      !problem_store_.viewer_solved(viewer.user_id, id, solved, err)) {
+    log(LogLevel::Error, "题目详情：本人状态查询失败: " + err);
+    send_error(res, 500, "内部错误");
+    return;
+  }
+
+  send_json(res, 200,
+            problem_detail_json(problem, samples, viewer.authenticated, solved));
 }
 
 void HttpServer::handle_submit(const httplib::Request &req,
@@ -1185,6 +1202,10 @@ json HttpServer::submission_result_json(
   body["compile_ok"] = judge.compile_ok;
   body["compile_output"] = record.compile_msg;
   body["compile_output_truncated"] = judge.compile_output_truncated;
+  // 全局硬上限 / 服务取消导致的「未执行全部测试点」需与普通失败区分，供前端
+  // 明确说明原因；未执行点不会出现在 results 中，绝不伪造成通过。
+  body["global_deadline_hit"] = judge.global_deadline_hit;
+  body["cancelled"] = judge.cancelled;
   body["message"] = judge.message;
   body["created_at"] = record.created_at;
   try {

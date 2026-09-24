@@ -293,6 +293,37 @@ bool ProblemStore::find_by_id(std::int64_t id, bool &found, ProblemRecord &out,
   return false;
 }
 
+bool ProblemStore::viewer_solved(std::int64_t user_id,
+                                 std::int64_t problem_id, bool &out_solved,
+                                 std::string &error) {
+  out_solved = false;
+  // 游客（user_id<=0）不查询，保持未 AC；本人状态只依据已验证身份。
+  if (user_id <= 0) {
+    return true;
+  }
+  Statement stmt;
+  if (!db_.prepare("SELECT status FROM user_problem_status WHERE user_id = ? "
+                   "AND problem_id = ?",
+                   stmt, error)) {
+    return false;
+  }
+  if (!stmt.bind(1, static_cast<sqlite3_int64>(user_id)) ||
+      !stmt.bind(2, static_cast<sqlite3_int64>(problem_id))) {
+    error = stmt.errmsg();
+    return false;
+  }
+  int rc = stmt.step();
+  if (rc == SQLITE_ROW) {
+    out_solved = stmt.column_text(0) == "accepted";
+    return true;
+  }
+  if (rc == SQLITE_DONE) {
+    return true;
+  }
+  error = stmt.errmsg();
+  return false;
+}
+
 bool ProblemStore::list_samples(std::int64_t problem_id,
                                 std::vector<SampleCase> &out,
                                 std::string &error) {

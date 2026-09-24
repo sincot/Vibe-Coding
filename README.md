@@ -29,8 +29,9 @@
 - [x] M3.7 崩溃恢复与在途任务持久化（独立 `in_flight_tasks` 表 + 接收边界「容量预留→写库→入队」+ 结算事务内删除在途记录保证同一任务只结算一次 + 启动扫描未结算任务按当前配置/用例重新入队 + 题目缺失标记中断 + 单机 `flock` 实例互斥 + 删题在途保护；功能已实现，待独立测试验证）
 - [x] M4.1 页面基础设施（统一 hash 路由与访问条件、`unknown`/`guest`/`authenticated` 身份状态机与 `/api/me` 核实、统一 API 错误分类与 401/首改跳转、登录后返回原目标、页面生命周期与请求取消、请求超时）
 - [x] M4.2 题目列表（`GET /api/problems` 搜索/难度/标签/可见性组合筛选 + 每页 20 条分页与紧凑页码范围 + 通过人数与本人 AC 状态 + 管理员隐藏题目标识与「全部/公开/隐藏」筛选 + 标签选项 `GET /api/problem-tags` + 查询条件承载于 hash 路由；功能已实现，待独立测试验证）
+- [x] M4.3 题目与做题页面（左题面/样例/限制/本人状态 + CDN CodeMirror 编辑器与 C/C++ 高亮、语言切换、`Ctrl+Enter` 提交 + 提交中/成功/失败状态与源码快照 + 全部逐点结果（状态/耗时/内存/原因）+ WA 输入/期望/实际输出 + 编译与诊断信息；已通过独立测试验证：后端 59 项断言 + 单元 4 用例、jsdom 54 项、真实 Chromium 28 项（含真实 CDN CodeMirror 高亮、ResizeObserver/refresh、窄视口单列、编辑器释放）、c8 前端覆盖率；全量回归 41/41。见 `tests/M4.3-test-report.md`）
 
-后续阶段（CodeMirror、提交历史/排行榜页面）尚未实现。
+后续阶段（提交历史/排行榜页面）尚未实现。
 
 ## 环境要求
 
@@ -616,6 +617,54 @@ OJ_JWT_SECRET="$(openssl rand -hex 32)" OJ_ADMIN_PASSWORD='请改为强密码' \
 - **范围**：本轮仅实现题目列表，不进入 M4.3（CodeMirror/做题页）、M4.4 提交历史与
   M4.5 排行榜；不重做全站视觉，不提供会进入空白页的导航入口。
 
+### 题目与做题页面（M4.3）
+
+在 M1.7 题目页基础上完善左侧题面/样例/限制/本人状态，并用 CodeMirror 替换
+`textarea`。页面实现位于 `web/js/pages/problem.js`，编辑器接入位于
+`web/js/editor.js`，结果渲染位于 `web/js/judge.js`，复用 M4.1 的路由、身份、
+错误处理与生命周期，未引入构建流程或前端框架。
+
+- **编辑器（CodeMirror 5）**：通过 CDN 引入 **固定版本 5.65.21**（cdnjs，
+  `https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.21/`），加载
+  `codemirror.min.css`、`codemirror.min.js`、`mode/clike/clike.min.js` 及
+  `matchbrackets`/`closebrackets`/`active-line`/`placeholder` 四个 addon；只使用
+  5.x API，不使用 `latest`。C/C++ 高亮模式按语言选择映射为
+  `text/x-c++src`（`cpp17`）与 `text/x-csrc`（`c11`）。切换语言只更新模式，
+  **绝不清空源码**，也不使用会覆盖已编辑内容的语言模板。
+- **加载失败与降级**：脚本/样式以动态 `<link>`/`<script>` 注入并设 8 秒超时，
+  CDN 不可达或超时不会阻塞首屏（不会让整个应用一直加载）。加载或初始化失败时
+  **保留可编辑的 `textarea#source-code`** 并给出明确提示，源码仍可正常提交；
+  编辑器就绪前，提交逻辑通过 `getValue()` 读取 `textarea`，始终有确定的数据来源。
+- **快捷键与提交**：提交按钮与 `Ctrl+Enter` 共用同一提交入口，执行相同的登录、
+  必要改密、语言、源码与提交中检查；CodeMirror 快捷键与降级文本框监听不会同时
+  触发，且 `submitting` 标志去重，不会重复提交。提交瞬间保存题目 ID、语言与源码
+  快照；等待期间继续编辑不改变已发出的提交，结果也只描述本次快照。
+- **提交状态**：请求期间禁用按钮并显示「判题中」，不伪造排队位置/百分比/进度；
+  `WA/CE/TLE/RE/MLE/SYSERR` 按后端响应作为判题结果展示；队列满载（503）、身份
+  失效（401）、权限不足（403/404）与网络异常沿用 M4.1 的处理。网络中断说明
+  「结果无法确认」、保留源码与语言选择、不自动重试；页面切换后旧提交响应不写入
+  新页面（前端停止等待不代表后端取消，后端结果仍会落库）。
+- **结果展示**：展示提交 ID、总体状态、运行耗时（程序执行，不含排队与编译）、
+  编译耗时、峰值内存与提交时间；未采集指标显示「未采集」而非 `0`。逐测试点按
+  后端顺序展示状态、耗时、内存与结构化原因；全局硬上限/服务取消/内部故障导致的
+  部分结果明确说明未全部执行，未执行点不伪造成通过，后端未提供总数时不猜测剩余。
+  WA 点展示输入、期望输出与实际输出（保留空白换行，区分「空字符串」与「后端未
+  提供」，输出截断明确标识）；编译诊断、程序标准错误与标准输出分开展示，截断信息
+  明确标识；长输出与多测试点可滚动查看。所有内容按纯文本渲染，不执行其中的 HTML。
+- **本人状态**：左侧显示登录用户本人该题 AC/未 AC 状态，游客不显示；数据来自
+  详情接口的 `solved`（后端 `user_problem_status`）。判题结果更新后重新从该接口
+  刷新本人状态——当前提交 WA 不代表历史 AC 失效，不把本次总体结果直接映射为
+  永久状态；这与 M4.2 返回列表时重新拉取状态的行为一致。
+- **释放与布局**：页面销毁时通过 `lifecycle.onDispose` 调用 `toTextArea()` 还原、
+  断开 `ResizeObserver` 与窗口监听，重复进入不会产生重复编辑器或重复提交事件；
+  布局变化时刷新编辑器尺寸。桌面保持左题面右编辑，窄视口（≤900px）改为上下排列。
+- **接口补充**：详情接口新增 `solved`（见「题目详情接口」，仅登录返回），提交响应
+  在 M3.4 字段基础上补充逐点 `output_truncated` 与提交级 `global_deadline_hit`/
+  `cancelled`，用于明确展示截断与「未全部执行」的原因；未新增隐藏用例下发路径。
+- **范围**：本轮不实现 M4.4 完整提交历史/`GET /api/status` 与 M4.5 排行榜，不改写
+  判题分类/统计/崩溃恢复规则；未额外持久化草稿、隐藏用例或诊断数据。本页不预加载
+  隐藏用例、不请求管理员用例接口。
+
 ### 注册接口
 
 `POST /api/register`（公开，无需登录），请求体为 JSON，仅读取 `nickname` 与 `password`：
@@ -860,7 +909,9 @@ curl -i http://127.0.0.1:8080/api/problem-tags
 ### 题目详情接口
 
 `GET /api/problems/{id}`（公开，无需登录），只返回元数据与**公开样例**，
-绝不包含隐藏用例：
+绝不包含隐藏用例。携带有效 token 时额外返回本人该题的 AC 状态 `solved`
+（数据来源 `user_problem_status`，用户 ID 取自后端鉴权，不接受客户端指定）；
+游客响应不含该字段：
 
 ```bash
 curl -i http://127.0.0.1:8080/api/problems/1
@@ -874,6 +925,16 @@ curl -i http://127.0.0.1:8080/api/problems/1
  "memory_limit_kb":65536,"visible":true,
  "samples":[{"input":"1 2\n","output":"3\n"},{"input":"100 -50\n","output":"50\n"}]}
 ```
+
+携带有效 token 时（`solved` 表示本人是否已 AC；无状态记录为 `false`）：
+
+```
+{"id":1,...,"samples":[...],"solved":false}
+```
+
+> `solved` 是 M4.3 详情页本人状态的最小读取能力，与列表接口的 `solved` 同源，
+> 不使用「列表第一页是否包含该题」等推断方式；游客不返回该字段。完整做题状态
+> 接口（`GET /api/status`）属 M4.4，本阶段不提前实现。
 
 ### 题目可见性
 
@@ -1306,6 +1367,7 @@ curl -i -X POST http://127.0.0.1:8080/api/problems/1/submit \
 {"id":12,"problem_id":1,"language":"cpp17","status":"AC","passed":5,"total":5,
  "runtime_ms":18,"memory_kb":8420,"compile_time_ms":640,"compile_ok":true,
  "compile_output":"","compile_output_truncated":false,
+ "global_deadline_hit":false,"cancelled":false,
  "message":"全部测试点通过","created_at":"2026-09-21 12:00:00",
  "results":[{"index":0,"status":"AC","time_ms":3,"memory_kb":8000},
             {"index":1,"status":"AC","time_ms":4,"memory_kb":8420}]}
@@ -1322,13 +1384,19 @@ curl -i -X POST http://127.0.0.1:8080/api/problems/1/submit \
   - `compile_time_ms` = 编译阶段墙钟耗时，单独展示，不混入 `runtime_ms`。
 - `memory_kb`（提交级）：已由 RSS 采样采集时返回数值，未采集到时返回 `null`。
   逐点结果的 `memory_kb` 同理。
-- `results`：逐测试点结果。通过（AC）测试点只含 `index/status/time_ms/memory_kb`，
-  **绝不附带隐藏测试输入或标准答案**；非 AC 点含 `reason`（结构化终止原因，如
-  `non_zero_exit`/`signaled`/`timed_out`/`memory_exceeded`）、`exit_code`、
-  `term_signal`、`message`、`stderr_output` 等诊断；`WA` 点另按 SPEC PRB-05/JUDGE-07
-  附上该失败点的 `input`/`expected_output`/`actual_output`。仅本次提交者可见。
+- `results`：逐测试点结果，按执行顺序（`index` 从 0 起）返回。通过（AC）测试点只含
+  `index/status/time_ms/memory_kb`，**绝不附带隐藏测试输入或标准答案**；非 AC 点含
+  `reason`（结构化终止原因，如 `non_zero_exit`/`signaled`/`timed_out`/
+  `memory_exceeded`/`cancelled`/`launch_failure`）、`exit_code`、`term_signal`、
+  `message`、`stderr_output`、`actual_output`（**始终返回，允许空字符串**，便于区分
+  「输出为空」与「未提供」）与 `output_truncated`（标准输出超限被截断）等诊断；
+  `WA` 点另按 SPEC PRB-05/JUDGE-07 附上该失败点的 `input`/`expected_output`。
+  仅本次提交者可见。
 - 编译失败返回 `status:"CE"` 并在 `compile_output` 给出编译器诊断（已清洗内部路径；
   超限时 `compile_output_truncated` 为 `true`），`results` 为空。
+- `global_deadline_hit`：单次判题全局硬上限耗尽时为 `true`，未执行的测试点不会出现在
+  `results` 中；`cancelled`：服务停止导致判题被取消时为 `true`（按内部错误记为
+  `SYSERR`）。两者供调用方明确区分「未执行全部测试点」的原因，未执行点不会伪造成通过。
 - 运行阶段全开 ASan/UBSan：越界、非法内存访问或不可恢复的未定义行为会导致非正常
   退出，按 `RE` 处理并保留诊断，绝不因输出碰巧匹配而判 `AC`；用户自行打印的类似
   文本不会单独导致失败。

@@ -596,6 +596,49 @@ pre.code-block {
   overflow: auto;
 }
 
+/* CodeMirror 5 编辑器（CDN 引入）；加载失败时保留上面的 textarea 作为降级入口。 */
+.code-editor-host {
+  position: relative;
+}
+
+/* 提高选择器权重，确保覆盖 CDN 在运行时后注入的 CodeMirror 默认样式。 */
+.code-editor-host .CodeMirror {
+  height: 420px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  line-height: 1.5;
+  background: var(--surface);
+}
+
+.code-editor-host .CodeMirror-focused {
+  border-color: var(--primary, #2563eb);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+
+.editor-status {
+  margin-top: 8px;
+}
+
+.editor-status:empty {
+  margin-top: 0;
+}
+
+.editor-status-detail {
+  font-size: 12px;
+  margin-top: 4px;
+  word-break: break-word;
+}
+
+.problem-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  font-size: 13px;
+}
+
 .editor-actions {
   display: flex;
   align-items: center;
@@ -628,6 +671,34 @@ pre.code-block {
   flex-direction: column;
   gap: 10px;
   margin-top: 12px;
+  /* 多测试点时长列表可滚动，避免撑坏页面。 */
+  max-height: 640px;
+  overflow: auto;
+}
+
+.case-reason {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  font-size: 13px;
+}
+
+.case-flag {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.case-empty,
+.case-note {
+  font-size: 12.5px;
+  margin-top: 4px;
 }
 
 .case-card {
@@ -673,6 +744,10 @@ pre.code-block {
 
   .source-editor {
     min-height: 240px;
+  }
+
+  .code-editor-host .CodeMirror {
+    height: 280px;
   }
 }
 

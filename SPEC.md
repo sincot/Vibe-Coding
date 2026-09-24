@@ -1420,13 +1420,62 @@ Vibe-Coding/
 
 #### M4.3 题目与做题页面
 
-- [ ] 完善左侧题面、样例、限制及本人状态展示。
-- [ ] 通过 CDN 引入 CodeMirror，替换 `textarea`，接入 C/C++ 高亮。
-- [ ] 实现语言切换与 `Ctrl+Enter` 提交。
-- [ ] 完善提交中、提交成功及请求失败状态。
-- [ ] 展示返回的全部测试点结果，包括状态、耗时和内存。
-- [ ] 展示 WA 测试点的输入、期望输出与实际输出。
-- [ ] 展示编译错误及其他判题诊断信息。
+- [x] 完善左侧题面、样例、限制及本人状态展示。
+- [x] 通过 CDN 引入 CodeMirror，替换 `textarea`，接入 C/C++ 高亮。
+- [x] 实现语言切换与 `Ctrl+Enter` 提交。
+- [x] 完善提交中、提交成功及请求失败状态。
+- [x] 展示返回的全部测试点结果，包括状态、耗时和内存。
+- [x] 展示 WA 测试点的输入、期望输出与实际输出。
+- [x] 展示编译错误及其他判题诊断信息。
+
+> 实施说明（M4.3 已完成并已通过独立测试验证）：
+>
+> - **编辑器（CodeMirror 5）**：通过 CDN 引入固定版本 **5.65.21**（cdnjs，
+>   `https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.21/`），加载
+>   `codemirror.min.css`/`codemirror.min.js` + `mode/clike` 及
+>   `matchbrackets`/`closebrackets`/`active-line`/`placeholder` addon；仅使用 5.x
+>   API，不使用 `latest`；`cpp17`→`text/x-c++src`、`c11`→`text/x-csrc`。切换
+>   语言只更新模式，不清空源码，也不使用会覆盖已编辑内容的语言模板。接入代码见
+>   `web/js/editor.js`，页面见 `web/js/pages/problem.js`。
+> - **加载失败降级**：动态注入并设 8 秒超时，CDN 失败/超时/初始化异常时保留可编辑的
+>   `textarea#source-code` 并明确提示，页面不空白、源码不丢失；编辑器就绪前提交逻辑
+>   经 `getValue()` 读取 `textarea`，始终有确定数据来源。
+> - **提交行为**：按钮与 `Ctrl+Enter` 共用同一入口，执行相同的登录/必要改密/语言/
+>   源码/提交中检查，`submitting` 去重不会重复提交；提交瞬间保存题目 ID、语言与源码
+>   快照，等待期间编辑不改变已发出的提交。请求期间禁用按钮并显示「判题中」，不伪造
+>   进度；判题结果与请求失败分开处理，网络中断说明结果无法确认、保留源码与语言选择、
+>   不自动重试；页面切换后旧响应不写入新页面。
+> - **结果展示**：显示提交 ID、总体状态、运行耗时（不含排队/编译）、编译耗时、峰值
+>   内存与提交时间；未采集指标显示「未采集」而非 0。逐测试点按后端顺序显示状态/耗时/
+>   内存/原因，部分执行（全局硬上限/服务取消/内部故障）明确说明，未执行点不伪造成
+>   通过；WA 点展示输入/期望/实际输出并区分空串与缺失、标识截断；编译诊断、标准错误
+>   与标准输出分开、截断标识；长输出可滚动；全部按纯文本渲染。
+> - **本人状态**：左侧仅对登录用户显示本人该题 AC/未 AC，游客不显示；数据来自详情
+>   接口新增的 `solved`（后端 `user_problem_status`，用户身份来自后端鉴权），不使用
+>   「列表第一页是否包含该题」推断；判题后从该接口刷新，不把本次结果直接映射为永久
+>   状态，与 M4.2 返回列表时刷新一致。
+> - **释放与布局**：通过 `lifecycle.onDispose` 在页面销毁时 `toTextArea()` 还原、
+>   断开 `ResizeObserver` 与窗口监听，重复进入不产生重复编辑器/提交事件；布局变化
+>   刷新尺寸。桌面左右分屏，窄视口（≤900px）上下排列。
+> - **接口最小补充**：`GET /api/problems/{id}` 登录时新增 `solved`；提交响应在 M3.4
+>   字段基础上补充逐点 `output_truncated` 与提交级 `global_deadline_hit`/`cancelled`，
+>   用于标识截断与部分执行原因；未下发隐藏用例、未新增管理员用例读取。
+> - **范围**：不实现 M4.4 完整提交历史/`GET /api/status` 与 M4.5 排行榜，不改写判题
+>   分类、统计或崩溃恢复规则；未新增草稿、隐藏用例或诊断的额外持久化。
+
+> **已通过独立测试验证**：新增单元 `tests/unit/test_problem_owner_status_unit.cpp`
+> （4 用例，覆盖 `viewer_solved` 的 accepted/none/无记录/游客/题目隔离）、集成
+> `tests/integration/test_m43_problem_page_api.cpp`（59 项断言，覆盖详情 `solved` 与
+> 鉴权可见性、提交响应新增字段、截断、执行阶段与编译阶段全局硬上限、服务取消）、页面级
+> `tests/frontend/m43_problem_page_dom.mjs` + `run_m43.sh`（jsdom，54 项断言，覆盖题面/
+> 样例/限制/本人状态、降级 textarea、语言切换、`Ctrl+Enter` 去重、结果渲染规则、
+> 编辑器适配与释放、网络失败保留源码）、真实浏览器
+> `tests/frontend/browser/m43_browser_scenarios.js` + `run_m43_browser.sh`（Chromium，
+> 28 项断言，覆盖真实 CDN CodeMirror 5.65.21 加载与 C/C++ 高亮、行号、语言切换、
+> ResizeObserver 触发的 refresh 实际布局调整、360/390/640 窄视口单列布局与可操作性、
+> 离开页面 `toTextArea` 释放）。前端覆盖率经 c8 采集（`run_m43_coverage.sh`：
+> editor.js 81.0%、judge.js 89.0%、problem.js 86.1% 行覆盖）。全量常规回归
+> `ctest --parallel 1` **41/41 通过**。完整逐项结果见 `tests/M4.3-test-report.md`。
 
 #### M4.4 提交历史与详情
 

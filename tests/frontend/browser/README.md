@@ -1,15 +1,43 @@
-# M4.1 真实浏览器验证（playwright-cli）
+# M4.1 / M4.3 真实浏览器验证（playwright-cli）
 
-本目录存放 M4.1「页面基础设施」的真实浏览器验证，**不注册 CTest、不属于项目运行依赖**。
-使用 `@playwright/cli`（命令 `playwright-cli`）驱动真实 Chromium，覆盖路由、导航、登录/
-退出、认证失效、权限不足、首次改密与返回原目标，以及桌面与窄视口布局。
+本目录存放真实浏览器验证，**不注册 CTest、不属于项目运行依赖**。
+使用 `@playwright/cli`（命令 `playwright-cli`）驱动真实 Chromium：M4.1 覆盖路由、导航、
+登录/退出、认证失效、权限不足、首次改密与返回原目标；M4.3 覆盖真实 CDN CodeMirror
+加载与 C/C++ 高亮、语言切换、ResizeObserver/refresh、窄视口布局与编辑器释放。
 
 ## 文件
 
-- `m41_browser_scenarios.js`：`playwright-cli run-code` 脚本（函数 `async (page) => …`）。
+- `m41_browser_scenarios.js`：M4.1 `playwright-cli run-code` 脚本（函数 `async (page) => …`）。
   运行前替换占位符 `__BASE__`（后端根 URL）与 `__OUT__`（截图目录）。
-- `run_m41_browser.sh`：Linux 端一键运行（自起隔离服务 + 真实浏览器 + 截图）。
-- `run_m41_browser.ps1`：Windows 端一键运行（连接已启动/已转发的服务，可用 `-Headed`）。
+- `run_m41_browser.sh`：M4.1 Linux 端一键运行（自起隔离服务 + 真实浏览器 + 截图）。
+- `run_m41_browser.ps1`：M4.1 Windows 端一键运行（连接已启动/已转发的服务，可用 `-Headed`）。
+- `m43_browser_scenarios.js` + `run_m43_browser.sh`：M4.3 真实浏览器验证。与 M4.1 脚本
+  相同占位符；runner 会解析场景返回的 JSON 统计通过/失败并以非零码退出。运行：
+
+  ```bash
+  # PWCLI 默认探测 /tmp/opencode/pwcli；也支持全局 playwright-cli
+  PWCLI=/path/to/playwright-cli PWCLI_BROWSER_LIBS=/path/to/libs \
+  BROWSER_ARTIFACTS_DIR=/tmp/m43-artifacts bash tests/frontend/browser/run_m43_browser.sh
+  ```
+
+### 环境准备（Linux，无 root）
+
+- 浏览器依赖库缺失时，可用 `apt-get download` + `dpkg-deb -x` 解包后经
+  `PWCLI_BROWSER_LIBS`（追加 `LD_LIBRARY_PATH`）提供，例如 `libasound2`、`libgbm1`、
+  `libwayland-server0`。本机已有可用解包目录 `/tmp/opencode/browserlibs`。
+- **中文渲染**：headless Chromium 若缺少 CJK 字体，中文会显示为方框。用户级安装（无需
+  root）示例：
+
+  ```bash
+  cd /tmp && apt-get download fonts-wqy-zenhei
+  dpkg-deb -x fonts-wqy-zenhei_*.deb /tmp/cjk && \
+    mkdir -p ~/.local/share/fonts && \
+    cp /tmp/cjk/usr/share/fonts/truetype/wqy/*.ttc ~/.local/share/fonts/ && \
+    fc-cache -f ~/.local/share/fonts
+  ```
+
+- 真实 CodeMirror 从 cdnjs 加载，需浏览器可访问外网；若离线，页面会按设计降级到
+  textarea（M4.3 场景中的高亮断言将不适用）。
 
 ## 运行方式
 
@@ -68,7 +96,11 @@ bash tests/frontend/browser/run_m41_browser.sh
 
 ## 场景
 
-`B-01` 桌面题目列表；`B-05` 桌面题面两列；`B-窄视口 360×640 / 390×844 / 768×1024`
+M4.3（`m43_browser_scenarios.js`）：`B43-01` 真实 CodeMirror 加载与 C/C++ 高亮；
+`B43-02` 语言切换更新模式且保留源码；`B43-03` ResizeObserver 触发 refresh 的实际布局
+调整；`B43-窄视口 360×640 / 390×844` 单列与可操作性；`B43-05` 离开页面释放编辑器。
+
+M4.1（`m41_browser_scenarios.js`）：`B-01` 桌面题目列表；`B-05` 桌面题面两列；`B-窄视口 360×640 / 390×844 / 768×1024`
 （列表与题面无横向溢出、题面单列）；`B-11` 未知路由/非法参数；`B-06` 游客访问后台重定向；
 `B-07` 首次改密保留原目标并返回；`B-12` 登录后导航；`B-09` 退出清理；`B-10` 认证失效；
 `B-08` 普通用户越权回退。脚本还断言无未捕获脚本错误（预期的 401/403/404 资源错误除外）。

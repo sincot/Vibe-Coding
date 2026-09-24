@@ -560,3 +560,25 @@ add_executable(oj_m37_recovery_api_test
 target_link_libraries(oj_m37_recovery_api_test PRIVATE oj_core)
 
 add_test(NAME m37_recovery_api COMMAND oj_m37_recovery_api_test)
+
+# M4.3 题目详情「本人做题状态」读取单元测试（gtest）：ProblemStore::viewer_solved
+# 的 accepted/none/无记录/游客/不存在题目/用户与题目隔离语义（隔离临时文件库）。
+add_executable(oj_problem_owner_status_unit
+  tests/unit/test_problem_owner_status_unit.cpp
+)
+
+target_link_libraries(oj_problem_owner_status_unit PRIVATE oj_core GTest::gtest_main)
+
+add_test(NAME problem_owner_status_unit COMMAND oj_problem_owner_status_unit)
+
+# M4.3 题目与做题页面后端接口集成测试（隔离临时库 + 随机端口 + 受控执行器）：
+# 详情 solved（游客不返回/登录返回/AC 后 true/仅 WA 仍 false/不泄露隐藏用例/401/404）、
+# 提交响应新增字段（global_deadline_hit/cancelled/output_truncated、非 AC 点
+# actual_output 始终存在）、全局硬上限部分执行、服务取消透传。
+add_executable(oj_m43_problem_page_api_test
+  tests/integration/test_m43_problem_page_api.cpp
+)
+
+target_link_libraries(oj_m43_problem_page_api_test PRIVATE oj_core)
+
+add_test(NAME m43_problem_page_api COMMAND oj_m43_problem_page_api_test)

@@ -113,6 +113,13 @@ public:
   bool find_by_id(std::int64_t id, bool &found, ProblemRecord &out,
                   std::string &error);
 
+  // 查询某用户对某题的做题状态（M4.3 详情页本人状态的最小读取能力）。
+  // user_id 必须来自已验证身份（<=0 表示游客，视为未 AC 且不查询）。
+  // out_solved 表示该用户在该题是否已 AC；无状态记录视为未 AC。
+  // 只读取 user_problem_status，不修改状态、不重新判题。返回 false 表示数据库错误。
+  bool viewer_solved(std::int64_t user_id, std::int64_t problem_id,
+                     bool &out_solved, std::string &error);
+
   // 读取某题的公开样例（is_sample=1），按 ord 升序、id 升序稳定排序。
   bool list_samples(std::int64_t problem_id, std::vector<SampleCase> &out,
                     std::string &error);

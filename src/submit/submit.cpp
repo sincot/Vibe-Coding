@@ -41,6 +41,11 @@ nlohmann::json build_per_case_impl(const judge::JudgeTask &task,
     if (item.global_deadline_hit) {
       entry["global_deadline_hit"] = true;
     }
+    // 标准输出超过采集上限被截断时明确标识，供前端区分「输出被截断」与
+    // 「完整但为空/缺失」，不静默丢弃。
+    if (item.output_truncated) {
+      entry["output_truncated"] = true;
+    }
     if (item.status != judge::JudgeStatus::AC) {
       // 结构化终止原因（执行层单一权威来源），便于分类透明与前端展示。
       entry["reason"] =
@@ -53,9 +58,9 @@ nlohmann::json build_per_case_impl(const judge::JudgeTask &task,
       if (!item.message.empty()) {
         entry["message"] = item.message;
       }
-      if (!item.actual_output.empty()) {
-        entry["actual_output"] = item.actual_output;
-      }
+      // 非 AC 点始终附带实际输出（允许空字符串），便于前端区分「输出为空」与
+      // 「后端未提供」，不对内容做 trim 或归一化。
+      entry["actual_output"] = item.actual_output;
       if (!item.stderr_output.empty()) {
         entry["stderr_output"] = item.stderr_output;
       }

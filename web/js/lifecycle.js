@@ -13,6 +13,9 @@ export function createLifecycle() {
   const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
   let disposed = false;
   let generation = 0;
+  // 页面自定义资源释放回调（如编辑器实例/监听器）。路由在切换页面时统一调用
+  // dispose()，异步页面无需要求路由处理其返回的清理函数。
+  const disposers = [];
 
   return {
     // 供 api.get(path, { signal }) 使用；仅在支持 AbortController 的环境下存在。
@@ -31,6 +34,23 @@ export function createLifecycle() {
     isCurrent(token) {
       return !disposed && token === generation;
     },
+    // 注册随页面销毁执行的清理回调，返回取消注册的函数。
+    onDispose(fn) {
+      if (typeof fn !== "function") return () => {};
+      if (disposed) {
+        try {
+          fn();
+        } catch (error) {
+          /* 单个清理回调异常不影响其它清理 */
+        }
+        return () => {};
+      }
+      disposers.push(fn);
+      return () => {
+        const index = disposers.indexOf(fn);
+        if (index >= 0) disposers.splice(index, 1);
+      };
+    },
     dispose() {
       if (disposed) return;
       disposed = true;
@@ -39,6 +59,14 @@ export function createLifecycle() {
           controller.abort();
         } catch (error) {
           /* 已中止或环境不支持，忽略 */
+        }
+      }
+      const pending = disposers.splice(0, disposers.length);
+      for (const fn of pending) {
+        try {
+          fn();
+        } catch (error) {
+          /* 单个清理回调异常不影响其它清理 */
         }
       }
     },
