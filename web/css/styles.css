@@ -1,29 +1,30 @@
-/* 全局样式：轻量、无构建、单一主题（浅色）。
+/* 全局样式：轻量、无构建、单一深色主题（与首页落地页一致）。
  * 组件统一：导航、卡片、表单、按钮、标签、表格、状态徽章、结果面板。
  * 目标是教学场景下的可读性：长题面、长输出均可滚动阅读。 */
 
 :root {
-  --bg: #f4f6fb;
-  --surface: #ffffff;
-  --surface-muted: #f8fafc;
-  --border: #e2e8f0;
-  --border-strong: #cbd5e1;
-  --text: #1e293b;
-  --text-muted: #64748b;
-  --primary: #2563eb;
-  --primary-hover: #1d4ed8;
-  --primary-soft: #eff6ff;
-  --accent: #16a34a;
-  --danger: #dc2626;
-  --danger-soft: #fef2f2;
-  --warn: #d97706;
-  --warn-soft: #fffbeb;
-  --info-soft: #eff6ff;
-  --code-bg: #0f172a;
+  color-scheme: dark;
+  --bg: #020617;
+  --surface: #0f172a;
+  --surface-muted: #0b1220;
+  --border: rgba(148, 163, 184, 0.18);
+  --border-strong: rgba(148, 163, 184, 0.3);
+  --text: #e2e8f0;
+  --text-muted: #94a3b8;
+  --primary: #3b82f6;
+  --primary-hover: #60a5fa;
+  --primary-soft: rgba(59, 130, 246, 0.16);
+  --accent: #34d399;
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.14);
+  --warn: #fbbf24;
+  --warn-soft: rgba(251, 191, 36, 0.14);
+  --info-soft: rgba(59, 130, 246, 0.16);
+  --code-bg: #020617;
   --code-text: #e2e8f0;
   --radius: 8px;
   --radius-sm: 4px;
-  --shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
   --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
     "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono",
@@ -190,6 +191,7 @@ a:hover {
 
 input[type="text"],
 input[type="password"],
+input[type="number"],
 select,
 textarea {
   font-family: inherit;
@@ -324,26 +326,26 @@ textarea {
 
 .alert-error {
   background: var(--danger-soft);
-  border-color: #fecaca;
-  color: #991b1b;
+  border-color: rgba(248, 113, 113, 0.32);
+  color: #fca5a5;
 }
 
 .alert-success {
-  background: #f0fdf4;
-  border-color: #bbf7d0;
-  color: #166534;
+  background: rgba(34, 197, 94, 0.14);
+  border-color: rgba(74, 222, 128, 0.32);
+  color: #86efac;
 }
 
 .alert-info {
   background: var(--info-soft);
-  border-color: #bfdbfe;
-  color: #1e40af;
+  border-color: rgba(96, 165, 250, 0.32);
+  color: #93c5fd;
 }
 
 .alert-warn {
   background: var(--warn-soft);
-  border-color: #fde68a;
-  color: #92400e;
+  border-color: rgba(251, 191, 36, 0.32);
+  color: #fcd34d;
 }
 
 .state {
@@ -445,54 +447,54 @@ table.data tbody tr.clickable:hover {
 }
 
 .difficulty-easy {
-  color: #166534;
-  background: #f0fdf4;
-  border-color: #bbf7d0;
+  color: #4ade80;
+  background: rgba(34, 197, 94, 0.14);
+  border-color: rgba(74, 222, 128, 0.32);
 }
 
 .difficulty-medium {
-  color: #92400e;
+  color: #fbbf24;
   background: var(--warn-soft);
-  border-color: #fde68a;
+  border-color: rgba(251, 191, 36, 0.32);
 }
 
 .difficulty-hard {
-  color: #991b1b;
+  color: #f87171;
   background: var(--danger-soft);
-  border-color: #fecaca;
+  border-color: rgba(248, 113, 113, 0.32);
 }
 
 /* 判题状态徽章 */
 .status-AC {
-  color: #166534;
-  background: #f0fdf4;
-  border-color: #bbf7d0;
+  color: #4ade80;
+  background: rgba(34, 197, 94, 0.14);
+  border-color: rgba(74, 222, 128, 0.32);
 }
 
 .status-WA {
-  color: #991b1b;
+  color: #f87171;
   background: var(--danger-soft);
-  border-color: #fecaca;
+  border-color: rgba(248, 113, 113, 0.32);
 }
 
 .status-CE {
-  color: #6b21a8;
-  background: #faf5ff;
-  border-color: #e9d5ff;
+  color: #c4b5fd;
+  background: rgba(168, 85, 247, 0.16);
+  border-color: rgba(196, 181, 253, 0.32);
 }
 
 .status-TLE,
 .status-MLE {
-  color: #92400e;
+  color: #fbbf24;
   background: var(--warn-soft);
-  border-color: #fde68a;
+  border-color: rgba(251, 191, 36, 0.32);
 }
 
 .status-RE,
 .status-SYSERR {
-  color: #991b1b;
-  background: #fef2f2;
-  border-color: #fecaca;
+  color: #f87171;
+  background: var(--danger-soft);
+  border-color: rgba(248, 113, 113, 0.32);
 }
 
 /* ---------- 账号展示（注册成功） ---------- */
@@ -943,21 +945,21 @@ pre.code-block {
 }
 
 .badge-public {
-  color: #166534;
-  background: #f0fdf4;
-  border-color: #bbf7d0;
+  color: #4ade80;
+  background: rgba(34, 197, 94, 0.14);
+  border-color: rgba(74, 222, 128, 0.32);
 }
 
 .badge-hidden {
-  color: #92400e;
+  color: #fbbf24;
   background: var(--warn-soft);
-  border-color: #fde68a;
+  border-color: rgba(251, 191, 36, 0.32);
 }
 
 .badge-role-admin {
-  color: #1e40af;
+  color: #93c5fd;
   background: var(--info-soft);
-  border-color: #bfdbfe;
+  border-color: rgba(96, 165, 250, 0.32);
 }
 
 .badge-role-user {
@@ -1346,51 +1348,19 @@ table.data tbody tr.current-user {
   color: #e2e8f0;
 }
 
-/* 首页期间的全局导航与页脚也切换为深色，避免浅色条块割裂整页风格 */
-.home-dark {
-  background: #020617;
-}
-
-.home-dark .site-header {
+/* 顶部导航使用半透明毛玻璃；导航内的次要按钮保持浅色描边以贴合深色头部。 */
+.site-header {
   background: rgba(2, 6, 23, 0.85);
-  border-bottom-color: rgba(148, 163, 184, 0.16);
   backdrop-filter: blur(8px);
 }
 
-.home-dark .brand {
-  color: #f8fafc;
-}
-
-.home-dark .brand:hover {
-  color: #93c5fd;
-}
-
-.home-dark .nav-link {
-  color: #94a3b8;
-}
-
-.home-dark .nav-link:hover {
-  color: #e2e8f0;
-}
-
-.home-dark .nav-link.active {
-  color: #93c5fd;
-  border-bottom-color: #3b82f6;
-}
-
-.home-dark .site-footer {
-  background: #020617;
-  border-top-color: rgba(148, 163, 184, 0.16);
-  color: #94a3b8;
-}
-
-.home-dark .btn-secondary {
+.site-header .btn-secondary {
   background: rgba(255, 255, 255, 0.06);
   color: #e2e8f0;
   border-color: rgba(255, 255, 255, 0.2);
 }
 
-.home-dark .btn-secondary:hover {
+.site-header .btn-secondary:hover {
   background: rgba(255, 255, 255, 0.13);
 }
 
@@ -1902,4 +1872,106 @@ table.data tbody tr.current-user {
     transition: none;
     transform: none;
   }
+}
+
+/* ---------- 表单控件与编辑器的深色适配 ---------- */
+input::placeholder,
+textarea::placeholder {
+  color: #64748b;
+}
+
+select option {
+  background: var(--surface-muted);
+  color: var(--text);
+}
+
+/* CodeMirror 5 默认主题的深色 token 配色：scope 到编辑器容器，覆盖 CDN 注入的默认样式。
+ * 离线降级为普通 textarea 时这些规则不生效，textarea 使用全局深色输入样式。 */
+.code-editor-host .CodeMirror-cursor {
+  border-left-color: #e2e8f0;
+}
+
+.code-editor-host .CodeMirror-selected {
+  background: rgba(59, 130, 246, 0.28);
+}
+
+.code-editor-host .CodeMirror-focused .CodeMirror-selected {
+  background: rgba(59, 130, 246, 0.34);
+}
+
+.code-editor-host .CodeMirror-gutters {
+  background: var(--surface-muted);
+  border-right: 1px solid var(--border);
+}
+
+.code-editor-host .CodeMirror-linenumber {
+  color: #64748b;
+}
+
+.code-editor-host .CodeMirror-activeline-background {
+  background: rgba(148, 163, 184, 0.08);
+}
+
+.code-editor-host .CodeMirror-matchingbracket {
+  color: #4ade80 !important;
+  border-bottom: 1px solid #4ade80;
+}
+
+.code-editor-host .cm-s-default .cm-comment {
+  color: #94a3b8;
+}
+
+.code-editor-host .cm-s-default .cm-keyword {
+  color: #c4b5fd;
+}
+
+.code-editor-host .cm-s-default .cm-atom,
+.code-editor-host .cm-s-default .cm-number {
+  color: #fbbf24;
+}
+
+.code-editor-host .cm-s-default .cm-def,
+.code-editor-host .cm-s-default .cm-variable-2,
+.code-editor-host .cm-s-default .cm-operator {
+  color: #93c5fd;
+}
+
+.code-editor-host .cm-s-default .cm-variable,
+.code-editor-host .cm-s-default .cm-bracket {
+  color: #e2e8f0;
+}
+
+.code-editor-host .cm-s-default .cm-type,
+.code-editor-host .cm-s-default .cm-builtin {
+  color: #5eead4;
+}
+
+.code-editor-host .cm-s-default .cm-string,
+.code-editor-host .cm-s-default .cm-string-2 {
+  color: #86efac;
+}
+
+.code-editor-host .cm-s-default .cm-meta {
+  color: #fca5a5;
+}
+
+.code-editor-host .cm-s-default .cm-tag {
+  color: #f87171;
+}
+
+.code-editor-host .cm-s-default .cm-attribute {
+  color: #fbbf24;
+}
+
+.code-editor-host .cm-s-default .cm-header {
+  color: #f8fafc;
+}
+
+.code-editor-host .cm-s-default .cm-link,
+.code-editor-host .cm-s-default .cm-qualifier {
+  color: #93c5fd;
+}
+
+.code-editor-host .cm-s-default .cm-error {
+  color: #f87171;
 }

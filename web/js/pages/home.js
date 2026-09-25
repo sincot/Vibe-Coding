@@ -336,7 +336,6 @@ export function renderHome(container) {
   document.title = "OJ 在线判题系统";
   container.replaceChildren();
   container.classList.add("home");
-  document.body.classList.add("home-dark");
 
   container.appendChild(hero());
   container.appendChild(stats());
@@ -349,6 +348,5 @@ export function renderHome(container) {
 
   return () => {
     container.classList.remove("home");
-    document.body.classList.remove("home-dark");
   };
 }
