@@ -480,8 +480,8 @@ void test_rate_limit_429_and_recovery() {
   check(blocked_res && blocked_res->status == 429, "达到阈值后 429");
   check(blocked_res->has_header("Retry-After"), "响应含 Retry-After 头");
 
-  // 窗口结束后恢复（推进时钟超过 900s 窗口）。
-  fc.seconds = 901;
+  // 窗口结束后恢复（推进时钟超过 300s 窗口）。
+  fc.seconds = 301;
 
   std::string account = register_user(cli, "frank", "GoodPass1");
   int status = 0;

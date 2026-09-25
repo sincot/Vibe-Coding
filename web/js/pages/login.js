@@ -9,7 +9,14 @@ import { api } from "../api.js";
 import { setAuth } from "../auth.js";
 import { peekPendingTarget } from "../storage.js";
 import { completePostAuthRedirect, navigate } from "../router.js";
-import { field, h, setBusy, setMessage } from "../util.js";
+import {
+  field,
+  h,
+  passwordField,
+  rateLimitMessage,
+  setBusy,
+  setMessage,
+} from "../util.js";
 
 export function renderLogin(container, context = {}) {
   document.title = "登录 · OJ";
@@ -41,7 +48,7 @@ export function renderLogin(container, context = {}) {
 
   const form = h("form", { class: "form" }, [
     field("账号", account, "普通用户为注册时分配的 10 位数字账号；管理员为 admin"),
-    field("密码", password, ""),
+    passwordField("密码", password, ""),
     message,
     submit,
   ]);
@@ -72,7 +79,8 @@ export function renderLogin(container, context = {}) {
     } catch (error) {
       setBusy(submit, false, null, "登录");
       if (error.isRateLimited && error.isRateLimited()) {
-        setMessage(message, "warn", error.message || "登录尝试过于频繁，请稍后再试");
+        // 提示自动解除时间，让用户知道稍后即可正常登录。
+        setMessage(message, "warn", rateLimitMessage(error.retryAfterSeconds));
       } else if (error.isAuthInvalid && error.isAuthInvalid()) {
         setMessage(message, "error", "账号或密码错误");
       } else if (error.aborted) {

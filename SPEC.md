@@ -388,9 +388,10 @@ Vibe-Coding/
 > - **登录响应**：`200` 返回 `token`、`token_type:"Bearer"`、`expires_in` 及
 >   `user{id, account, nickname, role, reset_pwd_flag}`，不含密码/哈希。
 > - **限速**：维度为来源 IP（`remote_addr`，不信任 `X-Forwarded-For`）；同一 IP
->   15 分钟窗口内 5 次失败后返回 `429` + `Retry-After`（秒）。成功登录清空计数；
->   窗口自最早失败起 15 分钟后自动解除。进程内互斥锁保护 + 周期性清理，线程安全、
->   并发不可绕过、状态不无限增长；不跨重启持久化（SPEC 未要求）。
+>   5 分钟窗口内 5 次失败后返回 `429` + `Retry-After`（秒）。成功登录清空计数；
+>   窗口自最早失败起 5 分钟后自动解除。前端登录页据 `Retry-After` 提示
+>   「登录过于频繁，在 N 分钟后就会消除，届时可以正常进行登录」。进程内互斥锁
+>   保护 + 周期性清理，线程安全、并发不可绕过、状态不无限增长；不跨重启持久化。
 > - **鉴权上下文**：`extract_bearer_token` 解析 `Authorization: Bearer <token>`；
 >   `authenticate_request` 验证 token 后按 `sub` 查询数据库确认用户存在并读取当前
 >   角色与首次改密标记，避免仅依赖 token 中可能过时的权限信息。`GET /api/me` 仅
@@ -1608,7 +1609,7 @@ Vibe-Coding/
 
 > **已通过回归验证**：新增集成 `tests/integration/test_m51_auth_regression.cpp`
 > （10 场景 / 72 项断言）补充既有测试未覆盖的边界：登录限速不信任 `X-Forwarded-For`/
-> `X-Real-IP`、成功登录清除失败计数、受控并发不可绕过、窗口边界（900s 仍受限、901s
+> `X-Real-IP`、成功登录清除失败计数、受控并发不可绕过、窗口边界（300s 仍受限、301s
 > 解除）；昵称规范化唯一性与内部空白、密码不裁剪不截断（含纯空白）、昵称按字节计长；
 > 并发不同昵称注册账号唯一无部分记录；账号永久不复用（`users.account` UNIQUE 约束 +
 > 重启后保留）；失败响应不泄露哈希/明文。审查轮在 `test_register_gtest` 补充「昵称按

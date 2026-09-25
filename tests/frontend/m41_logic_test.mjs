@@ -47,6 +47,7 @@ const storage = await import(mod("storage.js"));
 const lifecycleMod = await import(mod("lifecycle.js"));
 const api = await import(mod("api.js"));
 const router = await import(mod("router.js"));
+const util = await import(mod("util.js"));
 
 // ==========================================================================
 // T-01 路径规范化
@@ -195,6 +196,13 @@ check("网络错误标志", new api.ApiError("n", { network: true }).network);
 check("取消标志", new api.ApiError("a", { aborted: true }).aborted);
 check("retryable 透传", new api.ApiError("q", { status: 503, retryable: true }).retryable);
 
+// 登录限速提示：按 Retry-After 秒数换算为「分钟后消除」文案。
+check("限速缺省提示 5 分钟", /在 5 分钟后就会消除/.test(util.rateLimitMessage(0)), util.rateLimitMessage(0));
+check("限速 300s 提示 5 分钟", /在 5 分钟后就会消除/.test(util.rateLimitMessage(300)), util.rateLimitMessage(300));
+check("限速 61s 向上取整为 2 分钟", /在 2 分钟后就会消除/.test(util.rateLimitMessage(61)), util.rateLimitMessage(61));
+check("限速末段 5s 提示 1 分钟", /在 1 分钟后就会消除/.test(util.rateLimitMessage(5)), util.rateLimitMessage(5));
+check("限速文案含可正常登录", /可以正常进行登录/.test(util.rateLimitMessage(300)), util.rateLimitMessage(300));
+
 // ------------------------- fetch stub helpers -----------------------------
 function jsonResponse(status, body) {
   return new Response(JSON.stringify(body), {
@@ -229,6 +237,28 @@ api.resetUnauthorizedGuard();
 installFetch(async () => jsonResponse(401, { error: "账号或密码错误" }));
 await api.api.post("/api/login", { account: "x", password: "y" }, { auth: false }).catch(() => null);
 check("登录 401 不触发全局跳转", unauthorized === 0, "count=" + unauthorized);
+
+// 429 限速：解析 Retry-After 秒数，供登录页展示自动解除时间。
+installFetch(async () => new Response(JSON.stringify({ error: "登录尝试过于频繁" }), {
+  status: 429,
+  headers: { "content-type": "application/json", "Retry-After": "300" },
+}));
+let rlErr = null;
+await api.api.post("/api/login", { account: "x", password: "y" }, { auth: false }).catch((e) => {
+  rlErr = e;
+});
+check("429 分类为限速", rlErr && rlErr.isRateLimited());
+check("429 解析 Retry-After 秒数", rlErr && rlErr.retryAfterSeconds === 300, rlErr && rlErr.retryAfterSeconds);
+
+installFetch(async () => new Response(JSON.stringify({ error: "登录尝试过于频繁" }), {
+  status: 429,
+  headers: { "content-type": "application/json", "Retry-After": "not-a-number" },
+}));
+let rlErr2 = null;
+await api.api.post("/api/login", { account: "x", password: "y" }, { auth: false }).catch((e) => {
+  rlErr2 = e;
+});
+check("429 非法 Retry-After 回退 0", rlErr2 && rlErr2.retryAfterSeconds === 0, rlErr2 && rlErr2.retryAfterSeconds);
 
 installFetch(async () => jsonResponse(401, { error: "旧密码错误" }));
 auth.setAuth("tok-pwd", { id: 1, role: "admin", reset_pwd_flag: 0 });

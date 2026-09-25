@@ -25,6 +25,7 @@ export class ApiError extends Error {
     this.aborted = !!options.aborted;
     this.timeout = !!options.timeout;
     this.retryable = !!options.retryable;
+    this.retryAfterSeconds = options.retryAfterSeconds || 0;
     this.body = options.body || null;
   }
 
@@ -102,6 +103,14 @@ function notifyPasswordChangeRequired() {
   if (passwordChangeNotified) return;
   passwordChangeNotified = true;
   if (passwordRequiredHandler) passwordRequiredHandler();
+}
+
+// 解析 Retry-After（秒）。仅接受非负整数；缺失/非法（如 HTTP-date）返回 0，
+// 由调用方回退到默认提示，不猜测时间。
+function parseRetryAfter(value) {
+  if (!value) return 0;
+  const seconds = Number.parseInt(String(value).trim(), 10);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
 }
 
 export async function request(method, path, options = {}) {
@@ -198,10 +207,13 @@ export async function request(method, path, options = {}) {
       : `请求失败（HTTP ${response.status}）`;
   const code = data && typeof data.code === "string" ? data.code : "";
   const retryable = !!(data && data.retryable);
+  // 限速（429）时后端通过 Retry-After 头返回还需等待的秒数，供界面提示解除时间。
+  const retryAfterSeconds = parseRetryAfter(response.headers.get("Retry-After"));
   const apiError = new ApiError(message, {
     status: response.status,
     code,
     retryable,
+    retryAfterSeconds,
     body: data,
   });
 

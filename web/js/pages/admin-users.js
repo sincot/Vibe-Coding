@@ -12,6 +12,7 @@ import {
   h,
   openModal,
   pagination,
+  passwordField,
   setBusy,
   setMessage,
   showToast,
@@ -235,15 +236,8 @@ function openResetPasswordDialog(user, afterMutation) {
         class: "alert alert-warn",
         text: "重置后该用户需在下次登录后先修改密码（沿用既有强制改密策略）。无需旧密码。",
       }),
-      h("div", { class: "field" }, [
-        h("label", { text: "新密码", attrs: { for: "admin-reset-password" } }),
-        password,
-        h("span", { class: "hint", text: "非空、≤128，不裁剪不截断；不会记录到日志或本地存储" }),
-      ]),
-      h("div", { class: "field" }, [
-        h("label", { text: "确认新密码", attrs: { for: "admin-reset-confirm" } }),
-        confirm,
-      ]),
+      passwordField("新密码", password, "非空、≤128，不裁剪不截断；不会记录到日志或本地存储"),
+      passwordField("确认新密码", confirm, ""),
       message,
       h("div", { class: "modal-actions" }, [cancel, submit]),
     ]);

@@ -8,7 +8,7 @@ import { api } from "../api.js";
 import { getUser, setUser } from "../auth.js";
 import { consumePendingTarget } from "../storage.js";
 import { completePostAuthRedirect } from "../router.js";
-import { field, h, setBusy, setMessage, showToast } from "../util.js";
+import { h, passwordField, setBusy, setMessage, showToast } from "../util.js";
 
 export function renderPassword(container) {
   document.title = "修改密码 · OJ";
@@ -46,9 +46,9 @@ export function renderPassword(container) {
   });
 
   const form = h("form", { class: "form" }, [
-    field("旧密码", oldPassword, ""),
-    field("新密码", newPassword, "非空、长度不超过 128，且不能与旧密码相同"),
-    field("确认新密码", confirm, ""),
+    passwordField("旧密码", oldPassword, ""),
+    passwordField("新密码", newPassword, "非空、长度不超过 128，且不能与旧密码相同"),
+    passwordField("确认新密码", confirm, ""),
     message,
     submit,
   ]);

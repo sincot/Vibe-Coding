@@ -329,7 +329,7 @@ void test_rate_limit_concurrency_cannot_bypass() {
 }
 
 void test_rate_limit_window_boundary() {
-  std::cout << "限速窗口边界：15 分钟内受限，超过后解除\n";
+  std::cout << "限速窗口边界：5 分钟内受限，超过后解除\n";
   Env env("m51_window");
   check(env.ok(), "服务启动成功");
 
@@ -348,12 +348,12 @@ void test_rate_limit_window_boundary() {
     check(s == 401, "窗口内第 " + std::to_string(i + 1) + " 次失败 401");
   }
 
-  fc.seconds = 900; // 恰好到达窗口边界（自最早失败起 15 分钟）
+  fc.seconds = 300; // 恰好到达窗口边界（自最早失败起 5 分钟）
   int at_boundary = 0;
   login(cli, "9999999999", "bad", at_boundary);
-  check(at_boundary == 429, "恰好 15 分钟（900s）时仍受限 429");
+  check(at_boundary == 429, "恰好 5 分钟（300s）时仍受限 429");
 
-  fc.seconds = 901; // 超过窗口
+  fc.seconds = 301; // 超过窗口
   int after = 0;
   login(cli, "9999999999", "bad", after);
   check(after == 401, "超过窗口后解除限制并重新计数 401");

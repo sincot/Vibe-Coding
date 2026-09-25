@@ -117,6 +117,17 @@ export function showToast(message) {
 }
 
 // 表单提示区：kind ∈ error / success / info / warn。
+// 登录限速提示：把 Retry-After 秒数换算为「分钟后自动解除」的提示。
+// 后端窗口为 5 分钟，因此默认/缺失时说明 5 分钟；给出秒数时向上取整为分钟，
+// 避免在刚被限速时提示 4 分钟等偏小的值。用户据此知道届时可正常登录。
+export function rateLimitMessage(retryAfterSeconds) {
+  const seconds = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+    ? Math.ceil(retryAfterSeconds)
+    : 0;
+  const minutes = seconds > 0 ? Math.ceil(seconds / 60) : 5;
+  return `登录过于频繁，在 ${minutes} 分钟后就会消除，届时可以正常进行登录。`;
+}
+
 export function setMessage(node, kind, text) {
   if (!node) return;
   clear(node);
@@ -131,6 +142,35 @@ export function field(labelText, input, hintText) {
   const labelAttrs = input.id ? { for: input.id } : {};
   children.push(h("label", { text: labelText, attrs: labelAttrs }));
   children.push(input);
+  if (hintText) children.push(h("span", { class: "hint", text: hintText }));
+  return h("div", { class: "field" }, children);
+}
+
+// 密码字段：在普通字段基础上附加「显示/隐藏」按钮，仅切换明文展示，
+// 不改变 input 的 id/name 与提交逻辑，便于用户确认输入内容。
+export function passwordField(labelText, input, hintText) {
+  const toggle = h("button", {
+    class: "password-toggle",
+    text: "显示",
+    attrs: {
+      type: "button",
+      "aria-label": "显示密码",
+      "aria-pressed": "false",
+      tabindex: "-1",
+    },
+  });
+  toggle.addEventListener("click", () => {
+    const show = input.type === "password";
+    input.type = show ? "text" : "password";
+    toggle.textContent = show ? "隐藏" : "显示";
+    toggle.setAttribute("aria-label", show ? "隐藏密码" : "显示密码");
+    toggle.setAttribute("aria-pressed", show ? "true" : "false");
+  });
+
+  const children = [];
+  const labelAttrs = input.id ? { for: input.id } : {};
+  children.push(h("label", { text: labelText, attrs: labelAttrs }));
+  children.push(h("div", { class: "password-wrap" }, [input, toggle]));
   if (hintText) children.push(h("span", { class: "hint", text: hintText }));
   return h("div", { class: "field" }, children);
 }

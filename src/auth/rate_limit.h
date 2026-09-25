@@ -20,7 +20,7 @@ class RateLimiter {
 public:
   struct Config {
     int max_failures = 5;       // 窗口内允许的最大失败次数
-    int window_seconds = 900;   // 滑动窗口时长（15 分钟）
+    int window_seconds = 300;   // 滑动窗口时长（5 分钟）
   };
 
   // 可注入时钟（返回单调时钟时间点），便于单元测试用可控时钟验证窗口/解除行为。

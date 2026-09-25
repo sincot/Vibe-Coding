@@ -3,7 +3,7 @@
 
 import { api } from "../api.js";
 import { navigate } from "../router.js";
-import { field, h, setBusy, setMessage } from "../util.js";
+import { field, h, passwordField, setBusy, setMessage } from "../util.js";
 
 export function renderRegister(container) {
   document.title = "注册 · OJ";
@@ -40,8 +40,8 @@ export function renderRegister(container) {
     { class: "form" },
     [
       field("昵称", nickname, "去除首尾空白后非空，长度不超过 30，全局唯一"),
-      field("密码", password, "非空，长度不超过 128；空白视为有效内容"),
-      field("确认密码", confirm, ""),
+      passwordField("密码", password, "非空，长度不超过 128；空白视为有效内容"),
+      passwordField("确认密码", confirm, ""),
       message,
       submit,
     ]
