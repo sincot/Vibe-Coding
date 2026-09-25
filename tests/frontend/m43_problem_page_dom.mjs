@@ -1,8 +1,8 @@
 // M4.3 题目与做题页面 DOM 级验证（jsdom 执行真实 web/js 模块，连接真实服务）。
 //
 // 覆盖：
-//   - 题目页左侧：标题/难度/标签/题面/公开样例/时空限制；游客不显示本人状态，
-//     登录用户显示未 AC/已 AC；判题后从详情接口刷新本人状态。
+//   - 题目页需登录：游客访问会被引导到登录页；登录用户可查看标题/难度/标签/题面/
+//     公开样例/时空限制，显示未 AC/已 AC；判题后从详情接口刷新本人状态。
 //   - 提交交互：降级 textarea 提交、语言切换不清空源码、Ctrl+Enter 与按钮共用入口
 //     且不重复提交、请求失败保留源码。
 //   - 编辑器适配：CDN 加载失败时降级到可编辑 textarea 并提示；预置 CodeMirror 时
@@ -199,27 +199,13 @@ const CE_CODE = "int main(){ this is not valid c++ }\n";
 const ctx = {};
 
 // ===========================================================================
-await scenario("M43-F1 游客浏览题目：题面/样例/限制显示，不显示本人状态", async () => {
+await scenario("M43-F1 游客访问题目被引导登录", async () => {
   clearDomAuth();
   await goto("/problems/1");
-  await waitFor(() => q(".problem-description"), { label: "problem page" });
-  await waitFor(() => q(".editor-status .alert-warn"), { label: "editor fallback" });
-
-  check("显示题目标题", /A\+B Problem/.test(q(".page-title").textContent), q(".page-title").textContent);
-  check("显示难度徽章（易）", /易/.test(q(".problem-meta").textContent), q(".problem-meta").textContent);
-  check("显示标签", /入门/.test(q(".problem-meta").textContent), q(".problem-meta").textContent);
-  check("显示纯文本题面", /给定两个整数/.test(q(".problem-description").textContent));
-  check("显示公开样例", qa(".sample").length >= 1, String(qa(".sample").length));
-  check(
-    "显示时间/内存限制",
-    /时间限制/.test(q(".limits").textContent) && /内存限制/.test(q(".limits").textContent),
-    q(".limits").textContent
-  );
-  check("游客不显示本人状态", !q(".problem-status"), bodyText().slice(0, 100));
-  const submit = q(".editor-actions button");
-  check("游客提交按钮禁用", submit && submit.disabled, submit ? String(submit.disabled) : "no button");
-  check("编辑器加载失败提示", q(".editor-status .alert-warn") !== null);
-  check("保留可编辑 textarea", !!el("source-code") && el("source-code").tagName === "TEXTAREA");
+  await waitFor(() => hash().startsWith("#/login"), { label: "guest redirected to login" });
+  check("游客被引导到登录页", hash().startsWith("#/login"), hash());
+  check("重定向携带题目目标", /redirect=%2Fproblems%2F1/.test(hash()), hash());
+  check("未渲染题目内容", !q(".problem-description"), bodyText().slice(0, 100));
   check("未触发脚本错误", consoleErrors.length === 0, consoleErrors.join(" || "));
 });
 
@@ -493,20 +479,15 @@ await scenario("M43-F5 编辑器适配：预置 CodeMirror 时委托实例、切
 });
 
 // ===========================================================================
-await scenario("M43-F6 游客快捷键不发起提交且源码保留", async () => {
-  // 使页面回到降级 textarea：ready 已为真，删除全局后 loadCodeMirror 解析到
-  // undefined，fromTextArea 抛错即降级，无需重新加载 CDN。
+await scenario("M43-F6 游客无法进入提交页", async () => {
+  // 题库与题目页均需登录：游客直接打开题目地址会被引导到登录页，
+  // 不会渲染源码编辑器，也就不会有任何提交入口。
   delete window.CodeMirror;
   clearDomAuth();
   await goto("/problems/1");
-  await waitFor(() => q(".problem-description"), { label: "page" });
-  const before = submitCount;
-  const textarea = el("source-code");
-  textarea.value = AC_CODE;
-  fireCtrlEnter(textarea);
-  await sleep(50);
-  check("游客快捷键不发起提交", submitCount === before, String(submitCount - before));
-  check("游客源码仍保留", textarea.value === AC_CODE);
+  await waitFor(() => hash().startsWith("#/login"), { label: "guest redirected" });
+  check("游客被引导到登录页", hash().startsWith("#/login"), hash());
+  check("未渲染源码编辑器", !el("source-code"), bodyText().slice(0, 100));
 });
 
 // ===========================================================================

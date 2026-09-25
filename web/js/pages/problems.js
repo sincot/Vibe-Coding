@@ -176,6 +176,9 @@ export function renderProblems(container, context = {}) {
   let authSignature = currentAuthSignature();
   const unsubscribe = subscribeAuth(() => {
     if (lifecycle.disposed) return;
+    // 退出登录由导航统一跳转；此处不再自行导航到需登录的列表页，
+    // 否则会覆盖退出流程并把列表页误记为登录后的返回目标。
+    if (!isLoggedIn()) return;
     const next = currentAuthSignature();
     if (next === authSignature) return;
     authSignature = next;

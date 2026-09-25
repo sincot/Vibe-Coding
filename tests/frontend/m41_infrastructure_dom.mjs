@@ -248,7 +248,9 @@ await scenario("M41-7 导航按认证状态渲染且不提供未实现入口", a
   const navText = q("#site-nav").textContent;
   check("登录后显示昵称", navText.includes(ctx.adminUser.nickname), navText);
   check("管理员显示后台入口", /管理后台/.test(navText), navText);
-  check("不提供排行榜空白入口", !/排行榜/.test(navText), navText);
+  // M4.5：排行榜已实现并接入导航；登录用户可见且指向已注册路由。
+  check("登录后显示排行榜入口", /排行榜/.test(navText), navText);
+  check("排行榜入口指向已注册路由", !!q("#site-nav a[href='#/leaderboard']"), navText);
   // M4.4：提交历史页面已实现并接入导航，不再是「未实现入口」。
   check("登录后显示已实现的提交历史入口", /提交历史/.test(navText), navText);
   check(
@@ -319,7 +321,8 @@ await scenario("M41-10 快速切换丢弃过期读取响应", async () => {
 
 // ===========================================================================
 await scenario("M41-11 反复进入不重复触发请求", async () => {
-  clearDomAuth();
+  // 题库需登录：以管理员身份验证重复进入只发起一次列表请求。
+  setDomAuth(ctx.adminToken, ctx.adminUser);
   const orig = globalThis.fetch;
   let count = 0;
   globalThis.fetch = (input, init) => {
@@ -346,7 +349,8 @@ await scenario("M41-11 反复进入不重复触发请求", async () => {
 
 // ===========================================================================
 await scenario("M41-12 快速连续切页只渲染最终页", async () => {
-  clearDomAuth();
+  // 题库需登录：以管理员身份验证快速切换后只渲染最终页。
+  setDomAuth(ctx.adminToken, ctx.adminUser);
   // 不等待中间渲染，连续切换多个路由，最后停在题目列表。
   router.navigate("/login");
   router.navigate("/register");

@@ -11,7 +11,7 @@
 - [x] M1.1 注册（10 位随机账号分配 + 昵称唯一性 + argon2id 密码哈希 + `POST /api/register`）
 - [x] M1.2 登录与身份验证（JWT 签发/校验 + `POST /api/login` + 登录限速 + Bearer 鉴权 + `GET /api/me`）
 - [x] M1.3 改密与权限检查（`POST /api/me/password` + admin 首登强制改密 + 可复用管理员权限检查）
-- [x] M1.4 最小题目数据与查询（`testcases.is_sample` 区分公开样例/隐藏用例 + 3 道幂等种子题 + `GET /api/problems` / `GET /api/problems/{id}` + 题目可见性）
+- [x] M1.4 最小题目数据与查询（`testcases.is_sample` 区分公开样例/隐藏用例 + 41 道幂等种子题 + `GET /api/problems` / `GET /api/problems/{id}` + 题目可见性）
 - [x] M1.5 最小判题器（`IExecutor` 抽象 + `LocalExecutor` + `JudgeEngine`：C++17/C11 编译、逐点执行、基础超时、有界输出、归一化比对与 AC/WA/CE/TLE/RE/SYSERR 汇总；仅开发环境验证，完整沙箱见 M3）
 - [x] M1.6 提交接口与持久化（`POST /api/problems/{id}/submit`：登录/首改/可见性校验 + 后端隐藏用例判题 + 单事务写入 `submissions` 与 `user_problem_status` + 同步返回逐点结果）
 - [x] M1.7 最小前端（cpp-httplib 静态托管 `web/` + 原生 HTML/CSS/ES Module + hash 路由 + 注册/登录/改密/题目列表/题目页 `textarea` 提交 + 统一 API 封装；仅开发环境验证）
@@ -164,7 +164,7 @@ cmake --build build --parallel 1
   `OJ_ADMIN_PASSWORD`，否则启动报错退出。
 - **已有数据库**：正常重启**不会**重置管理员密码/角色、不会重复创建 admin、
   不会清空数据，也**不会**自动导入种子题。
-- 种子题（3 道）仅在**显式** `--seed` 时导入，且幂等：
+- 种子题（41 道）仅在**显式** `--seed` 时导入，且幂等：
 
   ```bash
   ./build/oj_server --db data/oj.db --seed
@@ -1121,8 +1121,10 @@ curl -i -X POST http://127.0.0.1:8080/api/me/password \
 
 ### 种子数据导入
 
-内置 3 道简单种子题（A+B Problem、整数求和、求最大值），均为标准 ACM 输入输出模式，
-包含标题、纯文本题面、输入输出说明、公开样例、隐藏测试用例、难度、标签、时限与内存限制。
+内置 41 道种子题，其中 3 道为入门基础题（A+B Problem、整数求和、求最大值），其余
+38 道改编自 LeetCode 经典题目（如两数之和、回文数、有效的括号、爬楼梯、打家劫舍等），
+统一为 ACM 标准输入输出模式，包含标题、纯文本题面、输入输出说明、公开样例、隐藏测试
+用例、难度、标签、时限与内存限制。
 
 导入方式（`--seed`，显式执行一次，**不在服务启动时自动运行**）：
 
@@ -1134,7 +1136,7 @@ curl -i -X POST http://127.0.0.1:8080/api/me/password \
 输出示例：
 
 ```
-种子数据导入完成：新建题目 3 道（已存在的题目已跳过）
+种子数据导入完成：新建题目 41 道（已存在的题目已跳过）
 ```
 
 - **幂等**：种子题以 `problems.seed_key` 稳定标识，配合唯一索引保证同一道题只导入一次。

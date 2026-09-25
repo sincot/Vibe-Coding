@@ -85,7 +85,21 @@ async (page) => {
     }
   }
 
-  await page.goto(BASE + "/?bust=" + Date.now() + "#/problems", { waitUntil: "domcontentloaded" });
+  // 题库与题目页需登录：先注册并登录一个临时学生，再取种子题 id。
+  await page.goto(BASE + "/?bust=" + Date.now() + "#/login", { waitUntil: "domcontentloaded" });
+  const regStu = await page.evaluate(async (base) => {
+    const r = await fetch(base + "/api/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ nickname: "m43br_" + Date.now(), password: "UserPass123" }),
+    });
+    return r.json();
+  }, BASE);
+  await page.waitForSelector("#login-account", { timeout: 10000 });
+  await page.fill("#login-account", regStu.account);
+  await page.fill("#login-password", "UserPass123");
+  await page.click("#app form button[type=submit]");
+  await page.waitForFunction(() => location.hash.includes("/problems"), null, { timeout: 10000 });
   await page.waitForSelector("#app table.data tbody tr", { timeout: 10000 });
   const seedId = await page.evaluate(() =>
     document.querySelector("#app table.data tbody tr a").getAttribute("href").split("/").pop()

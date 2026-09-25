@@ -1,11 +1,11 @@
 // M4.5 排行榜页面 DOM 级验证（jsdom 执行真实 web/js 模块，连接真实服务）。
 //
 // 覆盖：
-//   - 导航：游客与登录用户均显示「排行榜」。
-//   - 排行榜页：渲染名次/昵称/AC 数/提交次数/首次 AC 时间；无 AC 显示「—」；
+//   - 导航：仅登录用户显示「排行榜」；游客不可见。
+//   - 排行榜页：需登录；渲染名次/昵称/AC 数/提交次数/首次 AC 时间；无 AC 显示「—」；
 //     分页到第 2 页；「刷新」按钮重新获取。
 //   - 当前用户高亮：登录后匹配 user_id 的行有 current-user；退出后移除。
-//   - 游客可直接访问，不被重定向到登录；无脚本错误。
+//   - 游客访问排行榜被重定向到登录；无脚本错误。
 //
 // 不注册 CTest；运行方式见 run_m45.sh。
 
@@ -150,17 +150,28 @@ async function scenario(name, fn) {
 const rows = () => qa("#app table.leaderboard-table tbody tr");
 
 async function main() {
-  // 先以游客身份浏览（排行榜为公开页面）。
-  await scenario("H1 导航（游客显示排行榜）", async () => {
+  // 排行榜需登录：先验证游客被引导登录，再以登录身份浏览。
+  await scenario("H1 导航（游客不显示排行榜）", async () => {
     const navText = (document.getElementById("site-nav") || {}).textContent || "";
-    check("游客导航含「排行榜」", navText.includes("排行榜"));
+    check("游客导航不含「排行榜」", !navText.includes("排行榜"));
   });
 
   let board = null;
-  await scenario("H2 游客直接访问排行榜（不被重定向）", async () => {
+  await scenario("H2 游客被引导登录，登录后可访问排行榜", async () => {
+    await goto("/leaderboard");
+    await waitFor(() => hash().startsWith("#/login"), { label: "guest redirected" });
+    check("游客访问排行榜被引导到登录页", hash().startsWith("#/login"), hash());
+
+    const loginRes = await api("POST", "/api/login", {
+      body: { account: ACCOUNT, password: PASSWORD },
+    });
+    check("种子用户登录成功", loginRes.status === 200 && !!loginRes.data);
+    if (loginRes.status !== 200) return;
+    setDomAuth(loginRes.data.token, loginRes.data.user);
+
     await goto("/leaderboard");
     await waitFor(() => rows().length > 0, { label: "leaderboard rows" });
-    check("游客可直接访问排行榜（未跳登录）", !hash().includes("/login"));
+    check("登录后可访问排行榜（未跳登录）", !hash().includes("/login"));
     const header = qa("#app table.leaderboard-table thead th").map((th) =>
       th.textContent.trim()
     );
@@ -173,7 +184,7 @@ async function main() {
     check("展示总数「共 " + board.total + " 名用户」",
       bodyText().includes("共 " + board.total + " 名用户"));
     check("存在分页控件", !!q(".pagination"));
-    check("游客无当前用户高亮", qa("tr.current-user").length === 0);
+    check("登录用户有当前用户高亮", qa("tr.current-user").length === 1);
     check("无 AC 用户显示「—」", rows().some((tr) => tr.textContent.includes("—")));
   });
 
@@ -229,7 +240,7 @@ async function main() {
     await sleep(50);
     check("退出后无当前用户高亮", qa("tr.current-user").length === 0);
     const navText = (document.getElementById("site-nav") || {}).textContent || "";
-    check("退出后导航仍显示「排行榜」", navText.includes("排行榜"));
+    check("退出后导航不再显示「排行榜」", !navText.includes("排行榜"));
   });
 
   await scenario("H7 无脚本错误", async () => {

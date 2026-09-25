@@ -195,12 +195,13 @@ await scenario("S1 游客访问后台路由", async () => {
   check("重定向携带目标页", /redirect=/.test(hash()), hash());
 });
 
-await scenario("S2 公开题目列表回归", async () => {
+await scenario("S2 游客访问题库被引导登录", async () => {
   clearDomAuth();
   await goto("/problems");
-  await waitFor(() => q("#app table.data"), { label: "public table" });
-  check("游客题目列表可渲染", !!q("#app table.data"));
-  check("种子题目可见", bodyText().includes("A+B") || bodyText().includes("求和"));
+  await waitFor(() => hash().startsWith("#/login"), { label: "guest redirected to login" });
+  check("游客访问题库被引导到登录页", hash().startsWith("#/login"), hash());
+  check("未渲染题目表格", !q("#app table.data"));
+  check("重定向携带原目标", /redirect=%2Fproblems/.test(hash()), hash());
 });
 
 await scenario("S3 普通用户直访后台", async () => {

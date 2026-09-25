@@ -56,31 +56,23 @@ export function renderNav() {
   nav.replaceChildren();
 
   nav.appendChild(
-    h("a", { class: "brand", text: "OJ 在线判题", attrs: { href: "#/problems" } })
+    h("a", { class: "brand", text: "OJ 在线判题", attrs: { href: "#/home" } })
   );
 
   const status = getAuthStatus();
   if (status === AUTH_UNKNOWN) {
-    // 身份核实中：仅展示骨架，避免根据本地旧信息短暂显示后台入口。
-    nav.appendChild(
-      h("div", { class: "nav-links" }, [
-        navLink("题目列表", "/problems"),
-        navLink("排行榜", "/leaderboard"),
-      ])
-    );
+    // 身份核实中：仅展示骨架，避免根据本地旧信息短暂显示需登录的入口。
     nav.appendChild(h("span", { class: "nav-spacer" }));
     nav.appendChild(h("span", { class: "nav-link muted", text: "身份确认中…" }));
     renderFooterAdmin();
     return;
   }
 
-  const links = h("div", { class: "nav-links" }, [
-    navLink("题目列表", "/problems"),
-    // 排行榜为公开页面，游客也可直接访问。
-    navLink("排行榜", "/leaderboard"),
-  ]);
-  // 提交历史需登录；游客不显示会跳转登录的入口。
+  const links = h("div", { class: "nav-links" }, [navLink("首页", "/home")]);
+  // 题库、题目详情、排行榜与提交历史均需登录；游客不显示会跳转登录的入口。
   if (isLoggedIn()) {
+    links.appendChild(navLink("题目列表", "/problems"));
+    links.appendChild(navLink("排行榜", "/leaderboard"));
     links.appendChild(navLink("提交历史", "/submissions"));
   }
   // 只有满足「已登录 + 已完成首次改密 + admin 角色」的账号显示管理入口。

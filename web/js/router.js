@@ -76,14 +76,14 @@ export function setNotFound(handler) {
 
 export function parseHash() {
   let raw = location.hash.startsWith("#") ? location.hash.slice(1) : location.hash;
-  if (!raw || raw === "/") raw = "/problems";
+  if (!raw || raw === "/") raw = "/home";
   const questionIndex = raw.indexOf("?");
   const rawPath = questionIndex >= 0 ? raw.slice(0, questionIndex) : raw;
   const search = questionIndex >= 0 ? raw.slice(questionIndex + 1) : "";
   const normalized = normalizePath(rawPath);
   return {
-    // 根路径与空路径都作为默认页面。
-    path: normalized === "/" ? "/problems" : normalized,
+    // 根路径与空路径都进入首页。
+    path: normalized === "/" ? "/home" : normalized,
     raw,
     query: new URLSearchParams(search),
   };

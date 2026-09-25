@@ -75,11 +75,23 @@ async (page) => {
     }
   }
 
-  // 首批种子题：取一个 id 供题目页使用。
-  await page.goto(BASE + "/?bust=" + Date.now() + "#/problems", { waitUntil: "domcontentloaded" });
-  await page.waitForSelector("#app table.data tbody tr", { timeout: 10000 });
+  // 题库与题目页需登录：取种子题 id（接口公开），并先注册/登录一个临时学生用于浏览。
   const listResp = await api("/api/problems");
   const seedId = listResp.data && listResp.data.problems && listResp.data.problems[0] && listResp.data.problems[0].id;
+  const browseNick = "m41br" + Date.now();
+  const regBrowse = await api("/api/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ nickname: browseNick, password: "UserPass123" }),
+  });
+  const browseAccount = regBrowse.data && regBrowse.data.account;
+  await page.goto(BASE + "/?bust=" + Date.now() + "#/login", { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#login-account", { timeout: 10000 });
+  await page.fill("#login-account", browseAccount);
+  await page.fill("#login-password", "UserPass123");
+  await page.click("#app form button[type=submit]");
+  await waitHash("/problems");
+  await page.waitForSelector("#app table.data tbody tr", { timeout: 10000 });
 
   // B-01 桌面题目列表
   await scenario("B-01 桌面题目列表", async () => {
@@ -90,9 +102,9 @@ async (page) => {
     ck("题目列表渲染行", rows >= 3, "rows=" + rows);
     ck("桌面无横向溢出", await noOverflow());
     const nav = await page.textContent("#site-nav");
-    ck("游客导航含登录/注册", /登录/.test(nav) && /注册/.test(nav), nav);
-    ck("无排行榜空白入口", !/排行榜/.test(nav), nav);
-    ck("无提交历史空白入口", !/提交历史/.test(nav), nav);
+    ck("登录后导航显示昵称", nav.includes(browseNick), nav);
+    ck("导航含排行榜入口", /排行榜/.test(nav), nav);
+    ck("导航含提交历史入口", /提交历史/.test(nav), nav);
     await page.screenshot({ path: OUT + "/desktop-1280x800-problems.png", fullPage: true });
   });
 
@@ -175,7 +187,7 @@ async (page) => {
     const nav = await page.textContent("#site-nav");
     ck("导航显示昵称", nav.includes("admin"), nav);
     ck("管理员显示后台入口", /管理后台/.test(nav), nav);
-    ck("仍无排行榜入口", !/排行榜/.test(nav), nav);
+    ck("导航含排行榜入口", /排行榜/.test(nav), nav);
   });
 
   // B-09 退出登录清理

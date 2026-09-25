@@ -62,12 +62,13 @@ check("空值归一为根", router.normalizePath("") === "/");
 // ==========================================================================
 console.log("\n== T-02 parseHash / matchRoute ==");
 globalThis.location.hash = "";
-check("空 hash 默认 /problems", router.parseHash().path === "/problems", router.parseHash().path);
+check("空 hash 默认 /home", router.parseHash().path === "/home", router.parseHash().path);
 globalThis.location.hash = "#";
-check("仅 # 默认 /problems", router.parseHash().path === "/problems", router.parseHash().path);
+check("仅 # 默认 /home", router.parseHash().path === "/home", router.parseHash().path);
 globalThis.location.hash = "#?q=1";
-check("空路径带查询默认 /problems", router.parseHash().path === "/problems", router.parseHash().path);
+check("空路径带查询默认 /home", router.parseHash().path === "/home", router.parseHash().path);
 // 注册与 main.js 同构的最小路由表
+router.addRoute("/home", () => {}, { access: "public" });
 router.addRoute("/problems", () => {}, { access: "public" });
 router.addRoute("/problems/:id", () => {}, { access: "public" });
 router.addRoute("/login", () => {}, { access: "public" });

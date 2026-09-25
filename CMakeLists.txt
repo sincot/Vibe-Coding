@@ -84,6 +84,7 @@ add_library(oj_core STATIC
   src/db/in_flight.cpp
   src/db/instance_lock.cpp
   src/db/seed.cpp
+  src/db/seed_data.cpp
   src/db/user_admin.cpp
   src/problem/validation.cpp
   src/problem/testcase_validation.cpp

@@ -8,6 +8,7 @@ import {
 import { subscribeAuth } from "./auth.js";
 import { ensureAuth, resetSessionVerification } from "./session.js";
 import { renderNav } from "./nav.js";
+import { renderHome } from "./pages/home.js";
 import { renderLeaderboard } from "./pages/leaderboard.js";
 import { renderProblem } from "./pages/problem.js";
 import { renderProblems } from "./pages/problems.js";
@@ -54,14 +55,14 @@ setPasswordRequiredHandler(() => {
   navigate("/password", { replace: true });
 });
 
+addRoute("/home", renderHome, { access: "public" });
 addRoute("/register", renderRegister, { access: "public" });
 addRoute("/login", renderLogin, { access: "public" });
 addRoute("/password", renderPassword, { access: "auth", allowDuringPasswordChange: true });
-addRoute("/problems", renderProblems, { access: "public" });
-addRoute("/problems/:id", renderProblem, { access: "public" });
-
-// 排行榜（M4.5）：公开页面，游客可直接访问；后端只返回聚合后的公开字段。
-addRoute("/leaderboard", renderLeaderboard, { access: "public" });
+// 题库、题目详情与排行榜均需登录：游客访问会被引导到登录页，登录成功后返回。
+addRoute("/problems", renderProblems, { access: "auth" });
+addRoute("/problems/:id", renderProblem, { access: "auth" });
+addRoute("/leaderboard", renderLeaderboard, { access: "auth" });
 
 // 本人提交历史与提交详情（M4.4）：需登录；详情接口在后台再按本人/管理员权限
 // 二次校验，前端检查只用于页面体验。

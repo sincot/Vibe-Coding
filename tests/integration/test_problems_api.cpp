@@ -60,6 +60,7 @@ void check(bool cond, const std::string &msg) {
 
 const std::string kTestSecret = "it-secret-0123456789abcdef";
 const std::string kAdminPassword = "AdminSecret123!";
+constexpr std::size_t kSeedProblemCount = 41;
 
 oj::auth::JwtConfig make_config() {
   oj::auth::JwtConfig cfg;
@@ -340,8 +341,9 @@ void test_seed_import_content() {
   std::vector<oj::ProblemSummary> list;
   std::string err;
   check(store.list(/*include_hidden=*/true, list, err), "列表查询成功");
-  check(list.size() == 3, "导入 3 道种子题");
-  check(list.size() == 3 && list[0].id < list[1].id && list[1].id < list[2].id,
+  check(list.size() == kSeedProblemCount, "导入 41 道种子题");
+  check(list.size() == kSeedProblemCount && list[0].id < list[1].id &&
+            list[1].id < list[2].id,
         "列表按 id 升序稳定排序");
 
   std::int64_t ab = seed_problem_id(env.db(), "a-plus-b");
@@ -397,7 +399,7 @@ void test_seed_idempotent() {
 
   std::int64_t before = count_rows(env.db(), "problems");
   std::int64_t tc_before = count_rows(env.db(), "testcases");
-  check(before == 3, "初始 3 道题");
+  check(before == static_cast<std::int64_t>(kSeedProblemCount), "初始 41 道题");
 
   std::int64_t ab = seed_problem_id(env.db(), "a-plus-b");
   std::string err;
@@ -463,8 +465,10 @@ void test_seed_atomic_rollback() {
   check(env.db().exec("DROP TRIGGER fail_tc;", err), "移除触发器");
   created = -1;
   check(oj::import_seed_problems(env.db(), created, err), "故障消除后导入成功");
-  check(created == 3, "恢复后新建 3 道题");
-  check(count_rows(env.db(), "problems") == 3, "最终 3 道题");
+  check(created == static_cast<int>(kSeedProblemCount), "恢复后新建 41 道题");
+  check(count_rows(env.db(), "problems") ==
+            static_cast<std::int64_t>(kSeedProblemCount),
+        "最终 41 道题");
 }
 
 // ---------------------------------------------------------------------------
@@ -480,9 +484,10 @@ void test_guest_list_and_detail() {
   auto list_res = get_problems(cli);
   check(list_res && list_res->status == 200, "游客列表 200");
   json list = json::parse(list_res->body);
-  check(list.value("total", -1) == 3, "列表 total 为 3");
-  check(list["problems"].is_array() && list["problems"].size() == 3,
-        "列表返回 3 条");
+  check(list.value("total", -1) == static_cast<int>(kSeedProblemCount),
+        "列表 total 为 41");
+  check(list["problems"].is_array() && list["problems"].size() == 20,
+        "默认分页返回首页 20 条");
   const json &first = list["problems"][0];
   check(first.contains("id") && first.contains("title") &&
             first.contains("difficulty") && first.contains("tags"),
@@ -555,7 +560,8 @@ void test_normal_user_only_visible() {
   auto list_res = get_problems(cli, "Bearer " + token);
   check(list_res && list_res->status == 200, "普通用户列表 200");
   json list = json::parse(list_res->body);
-  check(list.value("total", -1) == 3, "普通用户列表不含隐藏题（仍为 3）");
+  check(list.value("total", -1) == static_cast<int>(kSeedProblemCount),
+        "普通用户列表不含隐藏题（仍为 41）");
   for (const auto &p : list["problems"]) {
     if (p["id"].get<long long>() == hidden) {
       check(false, "隐藏题不应出现在普通用户列表");
@@ -591,7 +597,9 @@ void test_admin_visibility_and_first_change() {
 
   // 未改密：不能查看隐藏题（列表不含、详情 404）。
   auto list_first = get_problems(cli, "Bearer " + admin_token);
-  check(list_first && json::parse(list_first->body).value("total", -1) == 3,
+  check(list_first &&
+            json::parse(list_first->body).value("total", -1) ==
+                static_cast<int>(kSeedProblemCount),
         "未改密 admin 列表不含隐藏题");
   auto hidden_first = get_problem(cli, std::to_string(hidden),
                                   "Bearer " + admin_token);
@@ -608,13 +616,25 @@ void test_admin_visibility_and_first_change() {
   auto list_after = get_problems(cli, "Bearer " + admin_token);
   check(list_after && list_after->status == 200, "已改密 admin 列表 200");
   json list = json::parse(list_after->body);
-  check(list.value("total", -1) == 4, "已改密 admin 列表含隐藏题（4）");
+  check(list.value("total", -1) == static_cast<int>(kSeedProblemCount) + 1,
+        "已改密 admin 列表含隐藏题（42）");
   bool hidden_listed = false;
   bool hidden_visible_flag = true;
-  for (const auto &p : list["problems"]) {
-    if (p["id"].get<long long>() == hidden) {
-      hidden_listed = true;
-      hidden_visible_flag = p.value("visible", true);
+  int total_pages = list.value("total_pages", 1);
+  httplib::Headers admin_headers{{"Authorization", "Bearer " + admin_token}};
+  for (int page = 1; page <= total_pages; ++page) {
+    auto page_res =
+        cli.Get(("/api/problems?page=" + std::to_string(page)).c_str(),
+                admin_headers);
+    if (!page_res || page_res->status != 200) {
+      continue;
+    }
+    json page_json = json::parse(page_res->body);
+    for (const auto &p : page_json["problems"]) {
+      if (p["id"].get<long long>() == hidden) {
+        hidden_listed = true;
+        hidden_visible_flag = p.value("visible", true);
+      }
     }
   }
   check(hidden_listed, "隐藏题出现在 admin 列表");
@@ -816,8 +836,9 @@ void test_persistence_restart() {
     httplib::Client cli("127.0.0.1", env.port());
     auto list_res = get_problems(cli);
     check(list_res && list_res->status == 200, "重启后列表 200");
-    check(json::parse(list_res->body).value("total", -1) == 3,
-          "重启后 3 道题仍在");
+    check(json::parse(list_res->body).value("total", -1) ==
+              static_cast<int>(kSeedProblemCount),
+          "重启后 41 道题仍在");
     std::int64_t ab = seed_problem_id(env.db(), "a-plus-b");
     auto detail = get_problem(cli, std::to_string(ab));
     check(detail && detail->status == 200, "重启后详情可访问");
